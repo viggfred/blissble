@@ -1,0 +1,16 @@
+# Binaries
+/blissctl
+/bin/
+*.exe
+
+# Go
+*.test
+*.out
+coverage*
+
+# Editor / OS
+.DS_Store
+*.swp
+
+# Local Claude Code settings
+.claude/
