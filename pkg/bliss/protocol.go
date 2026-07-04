@@ -41,6 +41,11 @@ var (
 	cmdRollerUp   = []byte{0xFF, 0x58, 0xEA, 0x41, 0xCF, 0x03, 0x01}
 	cmdRollerDown = []byte{0xFF, 0x58, 0xEA, 0x41, 0x1F, 0x03, 0x01}
 	cmdRollerStop = []byte{0xFF, 0x58, 0xEA, 0x41, 0x5F, 0x03, 0x01}
+
+	// "Fine adjust" — the app's slow/precision step used by the control UI's
+	// up/down nudge buttons (fineAdjust()).
+	cmdRollerFineUp   = []byte{0xFF, 0x58, 0xEA, 0x41, 0x22, 0x03, 0x01}
+	cmdRollerFineDown = []byte{0xFF, 0x58, 0xEA, 0x41, 0x23, 0x03, 0x01}
 	cmdReadStatus = []byte{0xFF, 0x58, 0xEA, 0x41, 0xD1, 0x03, 0x01}
 	cmdHeartbeat  = []byte{0xFF, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01}
 	gotoPrefix    = []byte{0xFF, 0x58, 0xEA, 0x41, 0xBF, 0x03}
@@ -57,6 +62,12 @@ func DownCommand() []byte { return clone(cmdRollerDown) }
 
 // StopCommand returns the "stop" frame.
 func StopCommand() []byte { return clone(cmdRollerStop) }
+
+// FineUpCommand returns the "fine adjust up" (slow/precision step) frame.
+func FineUpCommand() []byte { return clone(cmdRollerFineUp) }
+
+// FineDownCommand returns the "fine adjust down" (slow/precision step) frame.
+func FineDownCommand() []byte { return clone(cmdRollerFineDown) }
 
 // ReadStatusCommand returns the frame that requests a status report.
 func ReadStatusCommand() []byte { return clone(cmdReadStatus) }

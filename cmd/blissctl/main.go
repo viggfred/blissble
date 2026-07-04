@@ -107,6 +107,20 @@ func handleCommand(line string, blind *bliss.Blind) (quit bool) {
 		err = blind.Close()
 	case "stop":
 		err = blind.Stop()
+	case "fineup", "slowup":
+		err = blind.FineUp()
+	case "finedown", "slowdown":
+		err = blind.FineDown()
+	case "slow", "fine":
+		if len(fields) < 2 || (fields[1] != "up" && fields[1] != "down") {
+			fmt.Println("usage: slow up | slow down")
+			return false
+		}
+		if fields[1] == "up" {
+			err = blind.FineUp()
+		} else {
+			err = blind.FineDown()
+		}
 	case "pos", "position":
 		if len(fields) < 2 {
 			fmt.Println("usage: pos <0-100>")
@@ -140,6 +154,7 @@ func printHelp() {
   open | up          raise the blind
   close | down       lower the blind
   stop               halt movement
+  slow up|down       nudge slowly (fine adjust)
   pos <0-100>        move to a target position
   status | st        request a status report and show last known state
   help | ?           show this help

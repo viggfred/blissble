@@ -329,6 +329,12 @@ func (b *Blind) Close() error { return b.Send(DownCommand()) }
 // Stop halts movement.
 func (b *Blind) Stop() error { return b.Send(StopCommand()) }
 
+// FineUp nudges the blind up by a small step (the app's slow/fine adjust).
+func (b *Blind) FineUp() error { return b.Send(FineUpCommand()) }
+
+// FineDown nudges the blind down by a small step (the app's slow/fine adjust).
+func (b *Blind) FineDown() error { return b.Send(FineDownCommand()) }
+
 // SetPosition moves the blind to a target percentage (0..100).
 func (b *Blind) SetPosition(percent uint8) error {
 	return b.Send(GotoCommand(percent, b.cfg.Range))

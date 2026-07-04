@@ -35,6 +35,8 @@ func TestFixedCommands(t *testing.T) {
 		{"up", UpCommand(), "ff58ea41cf0301"},
 		{"down", DownCommand(), "ff58ea411f0301"},
 		{"stop", StopCommand(), "ff58ea415f0301"},
+		{"fineup", FineUpCommand(), "ff58ea41220301"},
+		{"finedown", FineDownCommand(), "ff58ea41230301"},
 		{"status", ReadStatusCommand(), "ff58ea41d10301"},
 		{"heartbeat", HeartbeatCommand(), "ff010101010101"},
 	}
