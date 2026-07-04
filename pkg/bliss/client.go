@@ -288,11 +288,11 @@ func (b *Blind) writeRaw(frame []byte) error {
 // the BLE link after a short idle period; if the write fails Send transparently
 // reconnects, re-logs-in, and retries once.
 func (b *Blind) Send(frame []byte) error {
-	if err := b.writeRaw(frame); err == nil {
+	err := b.writeRaw(frame)
+	if err == nil {
 		return nil
-	} else {
-		b.logger.Warn("command write failed; reconnecting", slog.Any("error", err))
 	}
+	b.logger.Warn("command write failed; reconnecting", slog.Any("error", err))
 	if err := b.reconnect(); err != nil {
 		return fmt.Errorf("reconnect failed: %w", err)
 	}
@@ -339,6 +339,49 @@ func (b *Blind) FineDown() error { return b.Send(FineDownCommand()) }
 func (b *Blind) SetPosition(percent uint8) error {
 	return b.Send(GotoCommand(percent, b.cfg.Range))
 }
+
+// SetSpeed selects a motor speed preset (25/50/75/100, snapped to nearest).
+func (b *Blind) SetSpeed(percent int) error { return b.Send(SpeedCommand(percent)) }
+
+// GoToFavorite moves the blind to its saved favorite position.
+func (b *Blind) GoToFavorite() error { return b.Send(GoToFavoriteCommand()) }
+
+// SetFavorite saves the current position as the favorite.
+func (b *Blind) SetFavorite() error { return b.Send(SetFavoriteCommand()) }
+
+// DeleteFavorite clears the saved favorite position.
+func (b *Blind) DeleteFavorite() error { return b.Send(DeleteFavoriteCommand()) }
+
+// SetClock syncs the motor's internal clock (required for schedules to fire at
+// the right wall-clock time).
+func (b *Blind) SetClock(t time.Time) error { return b.Send(SetClockCommand(t)) }
+
+// SyncClock sets the motor's clock to the current local time.
+func (b *Blind) SyncClock() error { return b.SetClock(time.Now()) }
+
+// AddTimer programs schedule slot index (1..TimerSlots) to move the blind to
+// positionPct on the given days at hour:minute:second. Results arrive via
+// OnEvent as EventTimerSet.
+func (b *Blind) AddTimer(index uint8, days Days, hour, minute, second, positionPct uint8, silent bool) error {
+	return b.Send(AddTimerCommand(index, days, hour, minute, second, positionPct, silent, b.cfg.Range))
+}
+
+// DeleteTimer clears schedule slot index. Results arrive via OnEvent.
+func (b *Blind) DeleteTimer(index uint8) error { return b.Send(DeleteTimerCommand(index)) }
+
+// ClearTimers deletes every schedule slot.
+func (b *Blind) ClearTimers() error {
+	for i := uint8(1); i <= TimerSlots; i++ {
+		if err := b.DeleteTimer(i); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// QueryTimerSlots requests the next free schedule slot (arrives via OnEvent as
+// EventTimerIndex).
+func (b *Blind) QueryTimerSlots() error { return b.Send(TimerSlotsQueryCommand()) }
 
 // RequestStatus asks the motor to report its status (arrives via OnEvent).
 func (b *Blind) RequestStatus() error { return b.Send(ReadStatusCommand()) }

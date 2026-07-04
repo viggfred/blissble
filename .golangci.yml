@@ -1,0 +1,32 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: standard # errcheck, govet, ineffassign, staticcheck, unused
+  enable:
+    - misspell
+    - revive
+    - unconvert
+    - usetesting
+  settings:
+    errcheck:
+      # Best-effort BLE cleanup — a failed disconnect is not actionable.
+      exclude-functions:
+        - (tinygo.org/x/bluetooth.Device).Disconnect
+        - (*github.com/viggfred/blissble/pkg/bliss.Blind).Disconnect
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - std-error-handling
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/viggfred/blissble

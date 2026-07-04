@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"testing"
+	"time"
 )
 
 func mustHex(t *testing.T, s string) []byte {
@@ -88,6 +89,65 @@ func TestParseStatusResponse(t *testing.T) {
 	}
 	if !ev.Direction {
 		t.Errorf("direction should be set")
+	}
+}
+
+func TestSpeedCommand(t *testing.T) {
+	cases := map[int]string{100: "ff58ea41f00301", 75: "ff58ea41f10301", 50: "ff58ea41f20301", 25: "ff58ea41f30301"}
+	for pct, want := range cases {
+		if got := SpeedCommand(pct); !bytes.Equal(got, mustHex(t, want)) {
+			t.Errorf("speed(%d) = %x, want %s", pct, got, want)
+		}
+	}
+	// snapping to nearest preset
+	if got := SpeedCommand(60); !bytes.Equal(got, mustHex(t, "ff58ea41f20301")) {
+		t.Errorf("speed(60) should snap to 50: %x", got)
+	}
+}
+
+func TestFavoriteCommands(t *testing.T) {
+	if got := GoToFavoriteCommand(); !bytes.Equal(got, mustHex(t, "ff58ea4193")) {
+		t.Errorf("gotoFavorite = %x", got)
+	}
+	if got := SetFavoriteCommand(); !bytes.Equal(got, mustHex(t, "ff58ea4191")) {
+		t.Errorf("setFavorite = %x", got)
+	}
+	if got := DeleteFavoriteCommand(); !bytes.Equal(got, mustHex(t, "ff58ea4192")) {
+		t.Errorf("deleteFavorite = %x", got)
+	}
+}
+
+func TestSetClockCommand(t *testing.T) {
+	// 2026-07-04 22:15:30 -> 1a 07 04 16 0f 1e
+	tm := time.Date(2026, time.July, 4, 22, 15, 30, 0, time.UTC)
+	if got := SetClockCommand(tm); !bytes.Equal(got, mustHex(t, "ff58ea410200"+"1a0704160f1e")) {
+		t.Errorf("setClock = %x", got)
+	}
+}
+
+func TestAddDeleteTimerCommand(t *testing.T) {
+	// slot 1, weekdays (0x3E), 07:30:00, 100% (=1000=e803), not silent
+	got := AddTimerCommand(1, Weekdays, 7, 30, 0, 100, false, 1000)
+	if !bytes.Equal(got, mustHex(t, "ff58ea41030001b23f3e071e00e803")) {
+		t.Errorf("addTimer = %x", got)
+	}
+	if Weekdays != 0x3E {
+		t.Errorf("Weekdays mask = %#x, want 0x3e", byte(Weekdays))
+	}
+	if got := DeleteTimerCommand(5); !bytes.Equal(got, mustHex(t, "ff58ea41030105")) {
+		t.Errorf("deleteTimer = %x", got)
+	}
+}
+
+func TestParseTimerResponses(t *testing.T) {
+	if ev, ok := ParseResponse(mustHex(t, "ff010203d70001")); !ok || ev.Type != EventTimerSet || !ev.Success {
+		t.Errorf("D7: ok=%v ev=%+v", ok, ev)
+	}
+	if ev, ok := ParseResponse(mustHex(t, "ff010203d80001")); !ok || ev.Type != EventTimerDelete || !ev.Success {
+		t.Errorf("D8: ok=%v ev=%+v", ok, ev)
+	}
+	if ev, ok := ParseResponse(mustHex(t, "ff010203d6000a")); !ok || ev.Type != EventTimerIndex || ev.Index != 10 {
+		t.Errorf("D6: ok=%v ev=%+v", ok, ev)
 	}
 }
 

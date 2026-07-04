@@ -1,5 +1,7 @@
 # blissble
 
+[![CI](https://github.com/viggfred/blissble/actions/workflows/ci.yml/badge.svg)](https://github.com/viggfred/blissble/actions/workflows/ci.yml)
+
 Control **Hunter Douglas "Bliss Smart Blinds"** motors directly over **Bluetooth Low Energy (BLE)** from Go — no hub, no cloud account, no vendor app.
 
 This is a clean-room reimplementation of the BLE protocol used by the official
@@ -43,6 +45,12 @@ blissctl -mac AA:BB:CC:DD:EE:01        # or set BLISS_MAC
 Connected and logged in. Type 'help' for commands, 'quit' to exit.
 blissble> open
 blissble> pos 50
+blissble> slow down                       # fine/precision nudge
+blissble> speed 50                         # motor speed preset (25/50/75/100)
+blissble> fav                              # go to saved favorite (setfav / delfav)
+blissble> clock                            # sync the motor clock (needed for schedules)
+blissble> timer add 1 07:30 100 weekdays   # open fully at 07:30 Mon–Fri
+blissble> timer slots                      # next free slot; timer del <n> / timer clear
 blissble> stop
 blissble> status
 blissble> quit
@@ -117,17 +125,29 @@ universal hard-coded password `xxxxxx`, so login is `FF 03 03 03 03 78 78 78 78 
 
 **Commands** (written to the Command characteristic):
 
-| Action        | Bytes                                   |
-|---------------|-----------------------------------------|
-| Up / open     | `FF 58 EA 41 CF 03 01`                  |
-| Down / close  | `FF 58 EA 41 1F 03 01`                  |
-| Stop          | `FF 58 EA 41 5F 03 01`                  |
-| Go to position| `FF 58 EA 41 BF 03` + position          |
-| Read status   | `FF 58 EA 41 D1 03 01`                  |
-| Heartbeat     | `FF 01 01 01 01 01 01`                  |
+| Action         | Bytes                                                             |
+|----------------|-------------------------------------------------------------------|
+| Up / open      | `FF 58 EA 41 CF 03 01`                                            |
+| Down / close   | `FF 58 EA 41 1F 03 01`                                            |
+| Stop           | `FF 58 EA 41 5F 03 01`                                            |
+| Fine up / down | `FF 58 EA 41 22 03 01` / `FF 58 EA 41 23 03 01` (slow step)       |
+| Go to position | `FF 58 EA 41 BF 03` + position                                    |
+| Speed preset   | `FF 58 EA 41 F0/F1/F2/F3 03 01` (100/75/50/25 %)                  |
+| Favorite       | `FF 58 EA 41 93` go · `91` save · `92` delete                     |
+| Read status    | `FF 58 EA 41 D1 03 01`                                            |
+| Heartbeat      | `FF 01 01 01 01 01 01`                                            |
+| Set clock      | `FF 58 EA 41 02 00` + `yy mm dd hh mm ss`                         |
+| Add timer      | `FF 58 EA 41 03 <silent> <slot> B2 3F <dayMask> hh mm ss` + position |
+| Delete timer   | `FF 58 EA 41 03 01 <slot>`                                        |
+| Query slots    | `FF 58 EA 41 04`                                                  |
 
 Position is scaled to the motor range (1000 on HD1300) and sent as a 16-bit
 little-endian value (e.g. 50% → 500 → `F4 01`); motors with range 100 use a single byte.
+
+Schedules use 16 slots (1–16). `dayMask` is a weekday bitmask —
+`Sun=0x01, Mon=0x02, Tue=0x04, Wed=0x08, Thu=0x10, Fri=0x20, Sat=0x40` (all = `0x7F`);
+`silent` = `0x80` suppresses the audible confirmation. The trailing position bytes
+encode the target the same way as *Go to position* (single-bar motors like HD1300).
 
 **Responses** (notifications) have header `FF 01 02 03` + opcode + payload:
 
@@ -136,6 +156,23 @@ little-endian value (e.g. 50% → 500 → `F4 01`); motors with range 100 use a 
 | `D4`   | login result   | byte[2] > 0 ⇒ success |
 | `D3`   | password set   | byte[2] > 0 ⇒ success |
 | `D2`   | status report  | byte[1]=flags, byte[2]=position; `flags & 0x18`: 0=battery ok, 0x10=low, 0x18=none; bit0=direction, bit1=limit-setting, bit2=remote-link |
+| `D1`   | readStatus reply | byte[2]=position %, byte[3..4]=raw position (LE) |
+| `D6`   | next free timer slot | byte[2]=slot index |
+| `D7`   | add-timer result | byte[2] > 0 ⇒ success |
+| `D8`   | delete-timer result | byte[2] > 0 ⇒ success |
+
+## Development
+
+```sh
+make tools     # install the pinned golangci-lint (once)
+make check     # build + vet + lint + test (what CI runs)
+make fmt       # gofmt + goimports
+make test      # go test -race ./...
+```
+
+CI (GitHub Actions, `.github/workflows/ci.yml`) runs build/vet/test and lint on
+every push and PR. Public repos get unlimited Actions minutes, so there's no
+usage concern here.
 
 ## Disclaimer
 

@@ -16,6 +16,7 @@ package bliss
 import (
 	"bytes"
 	"encoding/binary"
+	"time"
 )
 
 // GATT UUIDs for the Bliss control service. The motor is an nRF52 chip that
@@ -46,11 +47,31 @@ var (
 	// up/down nudge buttons (fineAdjust()).
 	cmdRollerFineUp   = []byte{0xFF, 0x58, 0xEA, 0x41, 0x22, 0x03, 0x01}
 	cmdRollerFineDown = []byte{0xFF, 0x58, 0xEA, 0x41, 0x23, 0x03, 0x01}
-	cmdReadStatus = []byte{0xFF, 0x58, 0xEA, 0x41, 0xD1, 0x03, 0x01}
-	cmdHeartbeat  = []byte{0xFF, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01}
-	gotoPrefix    = []byte{0xFF, 0x58, 0xEA, 0x41, 0xBF, 0x03}
-	loginPrefix   = []byte{0xFF, 0x03, 0x03, 0x03, 0x03}
+	cmdReadStatus     = []byte{0xFF, 0x58, 0xEA, 0x41, 0xD1, 0x03, 0x01}
+	cmdHeartbeat      = []byte{0xFF, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01}
+	gotoPrefix        = []byte{0xFF, 0x58, 0xEA, 0x41, 0xBF, 0x03}
+	loginPrefix       = []byte{0xFF, 0x03, 0x03, 0x03, 0x03}
+
+	// Speed presets.
+	cmdSpeed100 = []byte{0xFF, 0x58, 0xEA, 0x41, 0xF0, 0x03, 0x01}
+	cmdSpeed75  = []byte{0xFF, 0x58, 0xEA, 0x41, 0xF1, 0x03, 0x01}
+	cmdSpeed50  = []byte{0xFF, 0x58, 0xEA, 0x41, 0xF2, 0x03, 0x01}
+	cmdSpeed25  = []byte{0xFF, 0x58, 0xEA, 0x41, 0xF3, 0x03, 0x01}
+
+	// Favorite position (single-opcode frames).
+	cmdFavoriteGoto   = []byte{0xFF, 0x58, 0xEA, 0x41, 0x93}
+	cmdFavoriteSet    = []byte{0xFF, 0x58, 0xEA, 0x41, 0x91}
+	cmdFavoriteDelete = []byte{0xFF, 0x58, 0xEA, 0x41, 0x92}
+
+	// Schedule / timers.
+	setTimePrefix   = []byte{0xFF, 0x58, 0xEA, 0x41, 0x02, 0x00}
+	addTimerHeader  = []byte{0xFF, 0x58, 0xEA, 0x41, 0x03}
+	deleteTimerCmd  = []byte{0xFF, 0x58, 0xEA, 0x41, 0x03, 0x01}
+	timerSlotsQuery = []byte{0xFF, 0x58, 0xEA, 0x41, 0x04}
 )
+
+// TimerSlots is the number of schedule slots on the motor (indices 1..TimerSlots).
+const TimerSlots = 16
 
 func clone(b []byte) []byte { return append([]byte(nil), b...) }
 
@@ -87,10 +108,9 @@ func LoginCommand(password string) []byte {
 	return append(clone(loginPrefix), pw...)
 }
 
-// GotoCommand builds a move-to-position frame. percent is clamped to 0..100 and
-// scaled to motorRange; for a range of 1000 the value is encoded as a 16-bit
-// little-endian integer, otherwise as a single byte.
-func GotoCommand(percent uint8, motorRange int) []byte {
+// positionBytes encodes a percentage (0..100) scaled to motorRange: a 16-bit
+// little-endian value when range is 1000, otherwise a single byte.
+func positionBytes(percent uint8, motorRange int) []byte {
 	if percent > 100 {
 		percent = 100
 	}
@@ -98,14 +118,85 @@ func GotoCommand(percent uint8, motorRange int) []byte {
 		motorRange = DefaultRange
 	}
 	scaled := int(percent) * motorRange / 100
-	out := clone(gotoPrefix)
 	if motorRange == 1000 {
-		var b [2]byte
-		binary.LittleEndian.PutUint16(b[:], uint16(scaled))
-		return append(out, b[:]...)
+		b := make([]byte, 2)
+		binary.LittleEndian.PutUint16(b, uint16(scaled))
+		return b
 	}
-	return append(out, byte(scaled))
+	return []byte{byte(scaled)}
 }
+
+// GotoCommand builds a move-to-position frame for a percentage 0..100.
+func GotoCommand(percent uint8, motorRange int) []byte {
+	return append(clone(gotoPrefix), positionBytes(percent, motorRange)...)
+}
+
+// SpeedCommand returns the frame for a motor speed preset. percent is snapped to
+// the nearest supported preset (25, 50, 75 or 100).
+func SpeedCommand(percent int) []byte {
+	switch {
+	case percent <= 37:
+		return clone(cmdSpeed25)
+	case percent <= 62:
+		return clone(cmdSpeed50)
+	case percent <= 87:
+		return clone(cmdSpeed75)
+	default:
+		return clone(cmdSpeed100)
+	}
+}
+
+// GoToFavoriteCommand moves the blind to its saved favorite position.
+func GoToFavoriteCommand() []byte { return clone(cmdFavoriteGoto) }
+
+// SetFavoriteCommand saves the current position as the favorite.
+func SetFavoriteCommand() []byte { return clone(cmdFavoriteSet) }
+
+// DeleteFavoriteCommand clears the saved favorite position.
+func DeleteFavoriteCommand() []byte { return clone(cmdFavoriteDelete) }
+
+// Days is a weekday bitmask for schedule entries; OR the day constants together.
+type Days uint8
+
+const (
+	Sunday    Days = 0x01
+	Monday    Days = 0x02
+	Tuesday   Days = 0x04
+	Wednesday Days = 0x08
+	Thursday  Days = 0x10
+	Friday    Days = 0x20
+	Saturday  Days = 0x40
+
+	EveryDay Days = 0x7F                                             // all seven days
+	Weekdays Days = Monday | Tuesday | Wednesday | Thursday | Friday // Mon–Fri
+	Weekend  Days = Saturday | Sunday                                // Sat + Sun
+)
+
+// SetClockCommand syncs the motor's internal clock to t (used by schedules).
+func SetClockCommand(t time.Time) []byte {
+	return append(clone(setTimePrefix),
+		byte(t.Year()-2000), byte(int(t.Month())), byte(t.Day()),
+		byte(t.Hour()), byte(t.Minute()), byte(t.Second()))
+}
+
+// AddTimerCommand builds a schedule entry that moves the blind to positionPct on
+// the given days at hour:minute:second. index is the timer slot (1..TimerSlots);
+// silent suppresses the motor's audible confirmation. This encoding targets
+// single-bar motors (e.g. HD1300); dual-bar/tilt blinds append extra bytes.
+func AddTimerCommand(index uint8, days Days, hour, minute, second, positionPct uint8, silent bool, motorRange int) []byte {
+	silentByte := byte(0x00)
+	if silent {
+		silentByte = 0x80
+	}
+	frame := append(clone(addTimerHeader), silentByte, index, 0xB2, 0x3F, byte(days), hour, minute, second)
+	return append(frame, positionBytes(positionPct, motorRange)...)
+}
+
+// DeleteTimerCommand clears the schedule slot at index.
+func DeleteTimerCommand(index uint8) []byte { return append(clone(deleteTimerCmd), index) }
+
+// TimerSlotsQueryCommand requests the next available schedule slot.
+func TimerSlotsQueryCommand() []byte { return clone(timerSlotsQuery) }
 
 // BatteryLevel is the coarse battery state reported in status frames.
 type BatteryLevel uint8
@@ -135,9 +226,12 @@ type EventType uint8
 
 const (
 	EventUnknown     EventType = iota
-	EventStatus                // opcode 0xD2: position + flags + battery
+	EventStatus                // opcode 0xD2 / 0xD1: position + flags + battery
 	EventLoginResult           // opcode 0xD4
 	EventPasswordSet           // opcode 0xD3
+	EventTimerIndex            // opcode 0xD6: next available schedule slot
+	EventTimerSet              // opcode 0xD7: add/edit-timer result
+	EventTimerDelete           // opcode 0xD8: delete-timer result
 )
 
 // Event is a parsed response frame. Every frame carries the fixed 4-byte header
@@ -156,8 +250,11 @@ type Event struct {
 	Battery      BatteryLevel
 	HasBattery   bool // whether Battery is meaningful for this event
 
-	// EventLoginResult / EventPasswordSet:
+	// EventLoginResult / EventPasswordSet / EventTimerSet / EventTimerDelete:
 	Success bool
+
+	// EventTimerIndex:
+	Index uint8
 }
 
 var responseHeader = []byte{0xFF, 0x01, 0x02, 0x03}
@@ -217,6 +314,24 @@ func ParseResponse(frame []byte) (Event, bool) {
 			return Event{}, false
 		}
 		e.Type = EventPasswordSet
+		e.Success = payload[2] > 0
+	case 0xD6: // next available timer slot
+		if len(payload) < 3 {
+			return Event{}, false
+		}
+		e.Type = EventTimerIndex
+		e.Index = payload[2]
+	case 0xD7: // add/edit-timer result
+		if len(payload) < 3 {
+			return Event{}, false
+		}
+		e.Type = EventTimerSet
+		e.Success = payload[2] > 0
+	case 0xD8: // delete-timer result
+		if len(payload) < 3 {
+			return Event{}, false
+		}
+		e.Type = EventTimerDelete
 		e.Success = payload[2] > 0
 	default:
 		e.Type = EventUnknown
