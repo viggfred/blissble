@@ -89,6 +89,23 @@ func TestParseStatusResponse(t *testing.T) {
 	}
 }
 
+func TestParseD1StatusReply(t *testing.T) {
+	// Real captured readStatus reply at 75%: D1 02 4B EE02 CE1F 00.
+	ev, ok := ParseResponse(mustHex(t, "ff010203d1024bee02ce1f00"))
+	if !ok || ev.Type != EventStatus {
+		t.Fatalf("D1 parse: ok=%v ev=%+v", ok, ev)
+	}
+	if ev.Position != 75 {
+		t.Errorf("position = %d, want 75", ev.Position)
+	}
+	if ev.PositionRaw != 750 {
+		t.Errorf("positionRaw = %d, want 750", ev.PositionRaw)
+	}
+	if ev.HasBattery {
+		t.Errorf("D1 reply should not claim battery info")
+	}
+}
+
 func TestParseRejectsGarbage(t *testing.T) {
 	if _, ok := ParseResponse([]byte{0x01, 0x02}); ok {
 		t.Error("short frame should not parse")

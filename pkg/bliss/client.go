@@ -50,6 +50,7 @@ type Blind struct {
 	state     State
 	onEvent   func(Event)
 	loginCh   chan bool
+	rootCtx   context.Context // context from the initial Connect, for reconnects
 }
 
 // New creates a Blind client. Config.MACAddress must be set; all other fields
@@ -89,8 +90,16 @@ func (b *Blind) OnEvent(fn func(Event)) {
 // Connect enables the adapter, scans for the motor (BlueZ will not connect to a
 // device it has not discovered), connects, discovers the GATT characteristics,
 // subscribes to status notifications and logs in. It returns once login is
-// confirmed.
+// confirmed. The context is retained so that later commands can transparently
+// reconnect if the motor drops the link while idle.
 func (b *Blind) Connect(ctx context.Context) error {
+	b.mu.Lock()
+	b.rootCtx = ctx
+	b.mu.Unlock()
+	return b.connectOnce(ctx)
+}
+
+func (b *Blind) connectOnce(ctx context.Context) error {
 	if err := b.adapter.Enable(); err != nil {
 		return fmt.Errorf("enable bluetooth adapter: %w", err)
 	}
@@ -208,8 +217,10 @@ func (b *Blind) onNotify(buf []byte) {
 	switch ev.Type {
 	case EventStatus:
 		b.state.Position = ev.Position
-		b.state.Battery = ev.Battery
 		b.state.Direction = ev.Direction
+		if ev.HasBattery {
+			b.state.Battery = ev.Battery
+		}
 	case EventLoginResult:
 		b.state.LoggedIn = ev.Success
 		if b.loginCh != nil {
@@ -240,7 +251,7 @@ func (b *Blind) doLogin(ctx context.Context) error {
 		b.mu.Unlock()
 	}()
 
-	if err := b.Send(LoginCommand(b.cfg.Password)); err != nil {
+	if err := b.writeRaw(LoginCommand(b.cfg.Password)); err != nil {
 		return fmt.Errorf("send login: %w", err)
 	}
 	select {
@@ -256,9 +267,9 @@ func (b *Blind) doLogin(ctx context.Context) error {
 	}
 }
 
-// Send writes a raw command frame to the Command characteristic (write with
-// response, which this device requires).
-func (b *Blind) Send(frame []byte) error {
+// writeRaw writes a frame to the Command characteristic (write-with-response,
+// which this device requires) without any reconnect handling.
+func (b *Blind) writeRaw(frame []byte) error {
 	b.mu.RLock()
 	c := b.cmdChar
 	connected := b.connected
@@ -267,10 +278,46 @@ func (b *Blind) Send(frame []byte) error {
 		return errors.New("not connected")
 	}
 	if _, err := c.Write(frame); err != nil {
-		return fmt.Errorf("write command: %w", err)
+		return err
 	}
 	b.logger.Debug("sent", slog.String("hex", fmt.Sprintf("%X", frame)))
 	return nil
+}
+
+// Send writes a command frame to the Command characteristic. Battery motors drop
+// the BLE link after a short idle period; if the write fails Send transparently
+// reconnects, re-logs-in, and retries once.
+func (b *Blind) Send(frame []byte) error {
+	if err := b.writeRaw(frame); err == nil {
+		return nil
+	} else {
+		b.logger.Warn("command write failed; reconnecting", slog.Any("error", err))
+	}
+	if err := b.reconnect(); err != nil {
+		return fmt.Errorf("reconnect failed: %w", err)
+	}
+	if err := b.writeRaw(frame); err != nil {
+		return fmt.Errorf("write after reconnect: %w", err)
+	}
+	return nil
+}
+
+// reconnect tears down the (dropped) link and re-establishes it, reusing the
+// context supplied to the initial Connect so cancellation still applies.
+func (b *Blind) reconnect() error {
+	b.mu.RLock()
+	root := b.rootCtx
+	b.mu.RUnlock()
+	if root == nil {
+		root = context.Background()
+	}
+	if err := root.Err(); err != nil {
+		return err
+	}
+	_ = b.Disconnect()
+	ctx, cancel := context.WithTimeout(root, b.cfg.ScanTimeout+15*time.Second)
+	defer cancel()
+	return b.connectOnce(ctx)
 }
 
 // Open raises the blind (roller up).

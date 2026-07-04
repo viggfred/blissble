@@ -137,11 +137,13 @@ type Event struct {
 	Raw    []byte
 
 	// EventStatus fields:
-	Position     uint8 // device-reported position byte
+	Position     uint8  // device-reported position percentage (0..100)
+	PositionRaw  uint16 // raw position in motor-range units (0..Range), when present
 	Direction    bool
 	LimitSetting bool
 	RemoteLink   bool
 	Battery      BatteryLevel
+	HasBattery   bool // whether Battery is meaningful for this event
 
 	// EventLoginResult / EventPasswordSet:
 	Success bool
@@ -160,7 +162,7 @@ func ParseResponse(frame []byte) (Event, bool) {
 	op := payload[0]
 	e := Event{Opcode: op, Raw: clone(frame)}
 	switch op {
-	case 0xD2: // status report: flags, position
+	case 0xD2: // pushed status report: flags at [1], position % at [2]
 		if len(payload) < 3 {
 			return Event{}, false
 		}
@@ -170,6 +172,7 @@ func ParseResponse(frame []byte) (Event, bool) {
 		e.Direction = flags&0x01 != 0
 		e.LimitSetting = flags&0x02 != 0
 		e.RemoteLink = flags&0x04 != 0
+		e.HasBattery = true
 		switch flags & 0x18 {
 		case 0x00:
 			e.Battery = BatteryNormal
@@ -179,6 +182,18 @@ func ParseResponse(frame []byte) (Event, bool) {
 			e.Battery = BatteryNone
 		default:
 			e.Battery = BatteryUnknown
+		}
+		if len(payload) >= 5 {
+			e.PositionRaw = uint16(payload[3]) | uint16(payload[4])<<8
+		}
+	case 0xD1: // readStatus reply: position % at [2], raw 16-bit at [3:5]
+		if len(payload) < 3 {
+			return Event{}, false
+		}
+		e.Type = EventStatus
+		e.Position = payload[2]
+		if len(payload) >= 5 {
+			e.PositionRaw = uint16(payload[3]) | uint16(payload[4])<<8
 		}
 	case 0xD4: // login result
 		if len(payload) < 3 {
