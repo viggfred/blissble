@@ -132,7 +132,7 @@ func GotoCommand(percent uint8, motorRange int) []byte {
 }
 
 // SpeedCommand returns the frame for a motor speed preset. percent is snapped to
-// the nearest supported preset (25, 50, 75 or 100).
+// the nearest supported preset (25, 50, 75 or 100) at the midpoints 37/62/87.
 func SpeedCommand(percent int) []byte {
 	switch {
 	case percent <= 37:

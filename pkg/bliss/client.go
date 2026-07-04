@@ -43,6 +43,8 @@ type Blind struct {
 	adapter *bluetooth.Adapter
 	logger  *slog.Logger
 
+	sendMu sync.Mutex // serializes command delivery (and thus reconnects)
+
 	mu        sync.RWMutex
 	device    bluetooth.Device
 	cmdChar   bluetooth.DeviceCharacteristic
@@ -155,15 +157,26 @@ func (b *Blind) scan(ctx context.Context, target bluetooth.MAC) error {
 		scanErr <- b.adapter.Scan(func(a *bluetooth.Adapter, r bluetooth.ScanResult) {
 			if r.Address.MAC == target {
 				once.Do(func() {
-					_ = a.StopScan()
 					close(found)
+					_ = a.StopScan()
 				})
 			}
 		})
 	}()
 	select {
-	case <-found:
-		return <-scanErr
+	case err := <-scanErr:
+		// Scan returned on its own — either because our callback matched and
+		// stopped it, or because it failed/ended early (so we don't wait out
+		// the whole timeout on, say, a busy adapter).
+		select {
+		case <-found:
+			return nil
+		default:
+		}
+		if err != nil {
+			return fmt.Errorf("scan failed: %w", err)
+		}
+		return fmt.Errorf("device %s not found (scan ended)", target.String())
 	case <-ctx.Done():
 		_ = b.adapter.StopScan()
 		<-scanErr
@@ -206,6 +219,22 @@ func (b *Blind) discover(device bluetooth.Device) (cmd, resp bluetooth.DeviceCha
 	return cmd, resp, nil
 }
 
+// applyEvent folds a parsed response event into a state snapshot. It is pure so
+// the state-transition logic can be unit-tested without a BLE connection.
+func applyEvent(s State, ev Event) State {
+	switch ev.Type {
+	case EventStatus:
+		s.Position = ev.Position
+		s.Direction = ev.Direction
+		if ev.HasBattery {
+			s.Battery = ev.Battery
+		}
+	case EventLoginResult:
+		s.LoggedIn = ev.Success
+	}
+	return s
+}
+
 // onNotify parses each notification, updates state, and fans out to OnEvent.
 func (b *Blind) onNotify(buf []byte) {
 	ev, ok := ParseResponse(buf)
@@ -214,20 +243,11 @@ func (b *Blind) onNotify(buf []byte) {
 		return
 	}
 	b.mu.Lock()
-	switch ev.Type {
-	case EventStatus:
-		b.state.Position = ev.Position
-		b.state.Direction = ev.Direction
-		if ev.HasBattery {
-			b.state.Battery = ev.Battery
-		}
-	case EventLoginResult:
-		b.state.LoggedIn = ev.Success
-		if b.loginCh != nil {
-			select {
-			case b.loginCh <- ev.Success:
-			default:
-			}
+	b.state = applyEvent(b.state, ev)
+	if ev.Type == EventLoginResult && b.loginCh != nil {
+		select {
+		case b.loginCh <- ev.Success:
+		default:
 		}
 	}
 	cb := b.onEvent
@@ -288,6 +308,8 @@ func (b *Blind) writeRaw(frame []byte) error {
 // the BLE link after a short idle period; if the write fails Send transparently
 // reconnects, re-logs-in, and retries once.
 func (b *Blind) Send(frame []byte) error {
+	b.sendMu.Lock()
+	defer b.sendMu.Unlock()
 	err := b.writeRaw(frame)
 	if err == nil {
 		return nil

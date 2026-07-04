@@ -25,6 +25,10 @@ func TestLoginCommand(t *testing.T) {
 	if got := LoginCommand("12"); !bytes.Equal(got, mustHex(t, "ff03030303313200000000")) {
 		t.Fatalf("login(12) = %x", got)
 	}
+	// Passwords of 6+ bytes are sent verbatim (no truncation/padding).
+	if got := LoginCommand("longpass"); !bytes.Equal(got, mustHex(t, "ff030303036c6f6e6770617373")) {
+		t.Fatalf("login(longpass) = %x", got)
+	}
 }
 
 func TestFixedCommands(t *testing.T) {
@@ -165,6 +169,30 @@ func TestParseD1StatusReply(t *testing.T) {
 	}
 	if ev.HasBattery {
 		t.Errorf("D1 reply should not claim battery info")
+	}
+}
+
+func TestParseD2BatteryAndRaw(t *testing.T) {
+	// D2 flags 0x18 => battery none; position at [2], raw at [3..4] (LE).
+	ev, ok := ParseResponse(mustHex(t, "ff010203d2186414e8"))
+	if !ok || ev.Type != EventStatus || !ev.HasBattery {
+		t.Fatalf("D2 parse: ok=%v ev=%+v", ok, ev)
+	}
+	if ev.Battery != BatteryNone {
+		t.Errorf("battery = %v, want none", ev.Battery)
+	}
+	if ev.Position != 0x64 {
+		t.Errorf("position = %d, want 100", ev.Position)
+	}
+	if ev.PositionRaw != 0xE814 {
+		t.Errorf("positionRaw = %#x, want 0xe814", ev.PositionRaw)
+	}
+}
+
+func TestParseUnknownOpcode(t *testing.T) {
+	ev, ok := ParseResponse(mustHex(t, "ff010203ab0102"))
+	if !ok || ev.Type != EventUnknown || ev.Opcode != 0xAB {
+		t.Fatalf("unknown opcode: ok=%v ev=%+v", ok, ev)
 	}
 }
 

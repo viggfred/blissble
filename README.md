@@ -174,6 +174,15 @@ CI (GitHub Actions, `.github/workflows/ci.yml`) runs build/vet/test and lint on
 every push and PR. Public repos get unlimited Actions minutes, so there's no
 usage concern here.
 
+## Security & privacy
+
+The Bliss BLE protocol has **no meaningful authentication or encryption**: the
+login "password" is a fixed value baked into the app and shared across units,
+and every frame is plaintext. In effect, anyone within Bluetooth range can
+control the blind and read its status. That's a property of the device, not this
+library — this tool doesn't weaken anything, but it also can't add security the
+motor doesn't have. Keep it in mind before relying on these blinds for privacy.
+
 ## Disclaimer
 
 Independent, unofficial project. Not affiliated with or endorsed by Hunter Douglas.
