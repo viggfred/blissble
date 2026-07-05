@@ -1,6 +1,7 @@
 GOLANGCI_LINT_VERSION ?= v2.12.2
+BUMP ?= patch
 
-.PHONY: all check build test vet lint fmt tidy tools clean
+.PHONY: all check build test vet lint fmt tidy tools clean bump
 
 all: check
 
@@ -37,4 +38,21 @@ tools:
 
 ## clean: remove build artifacts
 clean:
-	rm -f blissctl
+	rm -f blissctl blissha
+
+## bump: tag the next semver release (BUMP=patch|minor|major); does not push
+bump:
+	@test -z "$$(git status --porcelain)" || { echo "working tree not clean; commit or stash first"; exit 1; }
+	@latest=$$(git describe --tags --abbrev=0 2>/dev/null || echo v0.0.0); \
+	ver=$${latest#v}; \
+	major=$$(echo $$ver | cut -d. -f1); minor=$$(echo $$ver | cut -d. -f2); patch=$$(echo $$ver | cut -d. -f3); \
+	case "$(BUMP)" in \
+	  major) major=$$((major+1)); minor=0; patch=0;; \
+	  minor) minor=$$((minor+1)); patch=0;; \
+	  patch) patch=$$((patch+1));; \
+	  *) echo "BUMP must be patch, minor or major (got '$(BUMP)')"; exit 1;; \
+	esac; \
+	next=v$$major.$$minor.$$patch; \
+	echo "bumping $$latest -> $$next"; \
+	git tag -a $$next -m "Release $$next"; \
+	echo "tagged $$next — publish with: git push origin main $$next"
