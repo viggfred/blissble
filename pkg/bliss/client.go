@@ -25,6 +25,10 @@ type Config struct {
 	Logger *slog.Logger
 	// ScanTimeout bounds discovery per Connect. Defaults to 20s.
 	ScanTimeout time.Duration
+	// ScanMutex, if set, is held for the duration of each BLE scan. The adapter
+	// permits only one scan at a time, so share one mutex across all Blind
+	// instances that use the same adapter to serialize their scans/reconnects.
+	ScanMutex *sync.Mutex
 }
 
 // State is a snapshot of the last known blind state.
@@ -150,6 +154,10 @@ func (b *Blind) connectOnce(ctx context.Context) error {
 // scan runs a BLE discovery until the target MAC appears (registering it with
 // BlueZ) or the scan window / context elapses.
 func (b *Blind) scan(ctx context.Context, target bluetooth.MAC) error {
+	if b.cfg.ScanMutex != nil {
+		b.cfg.ScanMutex.Lock()
+		defer b.cfg.ScanMutex.Unlock()
+	}
 	found := make(chan struct{})
 	var once sync.Once
 	scanErr := make(chan error, 1)

@@ -90,10 +90,59 @@ func main() {
 }
 ```
 
+## Home Assistant (blissha)
+
+`blissha` is a small daemon that bridges any number of blinds to Home Assistant
+over MQTT. It uses [MQTT discovery](https://www.home-assistant.io/integrations/mqtt/),
+so each blind shows up automatically as one HA **device** with:
+
+- a **Cover** — open / close / stop and a 0–100 position slider
+- **Buttons** — *Fast up/down* (full speed) and *Slow up/down* (fine step)
+- a **Battery** diagnostic sensor (normal / low / none)
+
+Standard Home Assistant cover controls just work — no custom dashboard needed.
+
+### Configure
+
+Copy [`cmd/blissha/config.example.yaml`](cmd/blissha/config.example.yaml) and edit:
+
+```yaml
+mqtt:
+  broker: tcp://192.168.1.10:1883
+  username: mqtt_user
+  password: mqtt_pass
+poll_interval: 30s
+blinds:
+  - name: Living Room
+    mac: AA:BB:CC:DD:EE:01
+    device_class: shade
+    # invert: true    # set if open/closed end up swapped in HA
+  - name: Bedroom
+    mac: AA:BB:CC:DD:EE:FF
+```
+
+### Run (podman / docker)
+
+The bridge talks to the host's BlueZ over the system D-Bus socket, so mount that
+socket and run the container as root:
+
+```sh
+podman build -t blissble -f Containerfile .
+podman run -d --name blissha \
+  -v /run/dbus/system_bus_socket:/run/dbus/system_bus_socket:ro \
+  -v ./config.yaml:/config/config.yaml:ro \
+  blissble
+```
+
+`docker` works the same way, and there's a [`compose.yaml`](compose.yaml) for
+Docker/Podman Compose. If BLE scanning misbehaves in a restricted network
+namespace, add `--net=host`.
+
 ## Layout
 
 ```
 cmd/blissctl     interactive CLI
+cmd/blissha      Home Assistant MQTT bridge (container)
 pkg/bliss        importable library
   protocol.go    pure command builders + response parser (no BLE deps, unit-tested)
   client.go      BLE transport (scan → connect → login → commands) via tinygo bluetooth
@@ -168,6 +217,7 @@ make tools     # install the pinned golangci-lint (once)
 make check     # build + vet + lint + test (what CI runs)
 make fmt       # gofmt + goimports
 make test      # go test -race ./...
+make bump BUMP=minor   # tag the next release (patch|minor|major); then git push --tags
 ```
 
 CI (GitHub Actions, `.github/workflows/ci.yml`) runs build/vet/test and lint on

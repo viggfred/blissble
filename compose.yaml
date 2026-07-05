@@ -1,0 +1,16 @@
+# Run blissha with `docker compose up -d` or `podman-compose up -d`.
+# Requires the host's Bluetooth (BlueZ) and an MQTT broker reachable from here.
+services:
+  blissha:
+    build:
+      context: .
+      dockerfile: Containerfile
+    # Or use a published image instead of building:
+    # image: ghcr.io/viggfred/blissble:latest
+    restart: unless-stopped
+    volumes:
+      # Talk to the host's BlueZ over the system D-Bus socket.
+      - /run/dbus/system_bus_socket:/run/dbus/system_bus_socket:ro
+      - ./config.yaml:/config/config.yaml:ro
+    # Uncomment if BLE scanning misbehaves in a restricted network namespace:
+    # network_mode: host
