@@ -175,14 +175,15 @@ func batteryDiscoveryPayload(mqtt MQTTConfig, b BlindConfig, id string) []byte {
 }
 
 // toHA converts a device position (0..100) to Home Assistant's convention
-// (0=closed, 100=open). The device reports higher values as more closed, so the
-// default maps HA = 100 - device; invert makes it a passthrough.
+// (0=closed, 100=open). The device uses the same orientation (100 = fully open),
+// so the default is a passthrough; invert reverses it for oppositely-mounted
+// blinds.
 func toHA(devicePos uint8, invert bool) int {
 	p := min(int(devicePos), 100)
 	if invert {
-		return p
+		return 100 - p
 	}
-	return 100 - p
+	return p
 }
 
 // toDevice is the inverse of toHA: it converts a Home Assistant position to the
@@ -190,7 +191,7 @@ func toHA(devicePos uint8, invert bool) int {
 func toDevice(haPos int, invert bool) uint8 {
 	haPos = max(0, min(haPos, 100))
 	if invert {
-		return uint8(haPos)
+		return uint8(100 - haPos)
 	}
-	return uint8(100 - haPos)
+	return uint8(haPos)
 }

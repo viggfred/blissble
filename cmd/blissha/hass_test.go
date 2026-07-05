@@ -15,14 +15,15 @@ func TestBlindID(t *testing.T) {
 }
 
 func TestPositionMapping(t *testing.T) {
-	// Default: HA 0=closed/100=open maps to device 100=closed/0=open.
+	// Default (invert=false) is a passthrough: device and HA share 100=open.
+	// invert=true reverses it.
 	cases := []struct {
 		dev    uint8
 		invert bool
 		ha     int
 	}{
-		{0, false, 100}, {100, false, 0}, {30, false, 70},
-		{0, true, 0}, {100, true, 100}, {30, true, 30},
+		{0, false, 0}, {100, false, 100}, {30, false, 30},
+		{0, true, 100}, {100, true, 0}, {30, true, 70},
 	}
 	for _, c := range cases {
 		if got := toHA(c.dev, c.invert); got != c.ha {
@@ -33,11 +34,11 @@ func TestPositionMapping(t *testing.T) {
 		}
 	}
 	// Clamping.
-	if got := toDevice(150, false); got != 0 {
-		t.Errorf("toDevice(150) = %d, want 0", got)
+	if got := toDevice(150, false); got != 100 {
+		t.Errorf("toDevice(150) = %d, want 100", got)
 	}
-	if got := toDevice(-5, true); got != 0 {
-		t.Errorf("toDevice(-5,invert) = %d, want 0", got)
+	if got := toDevice(-5, false); got != 0 {
+		t.Errorf("toDevice(-5) = %d, want 0", got)
 	}
 }
 
