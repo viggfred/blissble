@@ -1,7 +1,14 @@
 # Binaries
 /blissctl
+/blissha
 /bin/
 *.exe
+
+# Local blissha config — contains device MACs and broker credentials.
+# The committed template is cmd/blissha/config.example.yaml.
+config.home.yaml
+config.local.yaml
+config.yaml
 
 # Go
 *.test
