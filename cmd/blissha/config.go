@@ -40,6 +40,10 @@ type BlindConfig struct {
 	Password    string `yaml:"password"`     // optional; defaults to the built-in key
 	Invert      bool   `yaml:"invert"`       // flip position if open/closed are swapped in HA
 	DeviceClass string `yaml:"device_class"` // optional HA cover device_class (shade, blind, curtain, ...)
+	// Adapter selects which Bluetooth adapter drives this blind. Empty uses the
+	// default (hci0); otherwise "hciN" or the adapter's own Bluetooth MAC (the
+	// MAC is stable across reboots/replug, unlike hciN numbering).
+	Adapter string `yaml:"adapter"`
 }
 
 // Duration is a time.Duration that unmarshals from a string like "30s".

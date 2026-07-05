@@ -121,6 +121,13 @@ blinds:
     mac: AA:BB:CC:DD:EE:FF
 ```
 
+**Multiple adapters (multi-room).** BLE range is short, so for blinds in
+different rooms you can use one USB Bluetooth dongle per room (e.g. on a USB
+extension). Set each blind's `adapter:` to that dongle's own Bluetooth MAC —
+stable across reboots, unlike `hciN` numbering. Blinds on the same adapter
+serialize their scans; different adapters scan in parallel. Omit `adapter:` to
+use the default (`hci0`). BlueZ handles the multiple adapters automatically.
+
 **Battery saving.** By default `blissha` holds a persistent BLE connection. The
 connection itself — not the polling — is what costs battery, so set
 `idle_disconnect` (e.g. `30s`) to switch to **on-demand mode**: the link is kept

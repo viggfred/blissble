@@ -21,6 +21,7 @@ import (
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
+	"tinygo.org/x/bluetooth"
 
 	"github.com/viggfred/blissble/pkg/bliss"
 )
@@ -74,9 +75,24 @@ func main() {
 	})
 
 	client := mqtt.NewClient(opts)
-	scanMu := &sync.Mutex{} // one BLE scan at a time across all blinds
+	// Cache one Adapter and one scan mutex per physical dongle (keyed by hci id),
+	// so blinds on the same adapter serialize scans while different adapters scan
+	// in parallel.
+	adapters := map[string]*bluetooth.Adapter{}
+	scanMus := map[string]*sync.Mutex{}
 	for _, bc := range cfg.Blinds {
-		managers = append(managers, newManager(cfg.MQTT, bc, client, scanMu, time.Duration(cfg.Poll), time.Duration(cfg.IdleDisconnect), logger))
+		id, err := resolveHCI(bc.Adapter)
+		if err != nil {
+			logger.Error("skipping blind: bluetooth adapter not found", "blind", bc.Name, "adapter", bc.Adapter, "error", err)
+			continue
+		}
+		adapter, ok := adapters[id]
+		if !ok {
+			adapter = bluetooth.NewAdapter(id)
+			adapters[id] = adapter
+			scanMus[id] = &sync.Mutex{}
+		}
+		managers = append(managers, newManager(cfg.MQTT, bc, client, adapter, scanMus[id], time.Duration(cfg.Poll), time.Duration(cfg.IdleDisconnect), logger))
 	}
 
 	logger.Info("connecting to mqtt", "broker", cfg.MQTT.Broker, "blinds", len(managers))
@@ -126,12 +142,13 @@ type manager struct {
 	log            *slog.Logger
 }
 
-func newManager(mqttCfg MQTTConfig, bc BlindConfig, client mqtt.Client, scanMu *sync.Mutex, poll, idleDisconnect time.Duration, logger *slog.Logger) *manager {
+func newManager(mqttCfg MQTTConfig, bc BlindConfig, client mqtt.Client, adapter *bluetooth.Adapter, scanMu *sync.Mutex, poll, idleDisconnect time.Duration, logger *slog.Logger) *manager {
 	id := blindID(bc.MAC)
 	log := logger.With("blind", bc.Name, "mac", bc.MAC)
 	blind := bliss.New(bliss.Config{
 		MACAddress: bc.MAC,
 		Password:   bc.Password, // "" → library default
+		Adapter:    adapter,
 		Logger:     log,
 		ScanMutex:  scanMu,
 	})
@@ -243,6 +260,13 @@ func (m *manager) runOnDemand(ctx context.Context) {
 	idle := time.NewTimer(m.idleDisconnect)
 	idle.Stop()
 	defer m.blind.Disconnect()
+
+	// Connect once at startup so Home Assistant gets current position/battery
+	// immediately, rather than waiting for the first refresh tick.
+	m.ensureConnected(ctx)
+	m.requestStatus()
+	idle.Reset(m.idleDisconnect)
+
 	for {
 		select {
 		case <-ctx.Done():

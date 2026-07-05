@@ -25,6 +25,11 @@ blinds:
     device_class: shade        # optional: shade | blind | curtain | awning | ...
     # password: xxxxxx         # optional; defaults to the built-in key
     # invert: false            # set true if open/closed are swapped in HA
+    # adapter: "84:5C:F3:EC:8B:4F"  # which BT dongle to use (see below)
 
   - name: Bedroom
     mac: AA:BB:CC:DD:EE:FF
+    # With one dongle per room, pin each blind to a specific adapter. Prefer the
+    # dongle's own Bluetooth MAC (stable) over "hciN" (numbering can swap on
+    # reboot). Omit to use the default adapter (hci0).
+    # adapter: "00:1A:7D:11:22:33"
