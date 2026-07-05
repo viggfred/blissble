@@ -11,9 +11,16 @@ import (
 
 // Config is the top-level blissha YAML configuration.
 type Config struct {
-	MQTT   MQTTConfig    `yaml:"mqtt"`
-	Poll   Duration      `yaml:"poll_interval"`
-	Blinds []BlindConfig `yaml:"blinds"`
+	MQTT MQTTConfig `yaml:"mqtt"`
+	// Poll is the status-refresh cadence. In persistent mode it polls over the
+	// held connection; in on-demand mode it is how often to briefly connect just
+	// to refresh position/battery.
+	Poll Duration `yaml:"poll_interval"`
+	// IdleDisconnect, when > 0, enables on-demand mode: the BLE link is kept
+	// disconnected and only opened to run a command or a refresh, then dropped
+	// after this idle window. 0 (default) keeps a persistent connection.
+	IdleDisconnect Duration      `yaml:"idle_disconnect"`
+	Blinds         []BlindConfig `yaml:"blinds"`
 }
 
 // MQTTConfig holds broker connection and Home Assistant discovery settings.
@@ -79,8 +86,15 @@ func (c *Config) applyDefaults() {
 	if c.MQTT.BaseTopic == "" {
 		c.MQTT.BaseTopic = "blissble"
 	}
+	if c.IdleDisconnect < 0 {
+		c.IdleDisconnect = 0
+	}
 	if c.Poll <= 0 {
-		c.Poll = Duration(30 * time.Second)
+		if c.IdleDisconnect > 0 {
+			c.Poll = Duration(time.Hour) // on-demand: refresh infrequently
+		} else {
+			c.Poll = Duration(30 * time.Second)
+		}
 	}
 }
 

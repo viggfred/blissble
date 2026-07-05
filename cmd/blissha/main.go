@@ -76,7 +76,7 @@ func main() {
 	client := mqtt.NewClient(opts)
 	scanMu := &sync.Mutex{} // one BLE scan at a time across all blinds
 	for _, bc := range cfg.Blinds {
-		managers = append(managers, newManager(cfg.MQTT, bc, client, scanMu, time.Duration(cfg.Poll), logger))
+		managers = append(managers, newManager(cfg.MQTT, bc, client, scanMu, time.Duration(cfg.Poll), time.Duration(cfg.IdleDisconnect), logger))
 	}
 
 	logger.Info("connecting to mqtt", "broker", cfg.MQTT.Broker, "blinds", len(managers))
@@ -105,19 +105,28 @@ func main() {
 	client.Disconnect(500)
 }
 
-// manager owns one blind: its BLE connection, MQTT topics and HA discovery.
-type manager struct {
-	cfg    BlindConfig
-	mqtt   MQTTConfig
-	id     string
-	t      topics
-	blind  *bliss.Blind
-	client mqtt.Client
-	poll   time.Duration
-	log    *slog.Logger
+// blindOp is a BLE action queued by an MQTT handler and executed on the
+// manager's goroutine (so connect/idle handling stays in one place).
+type blindOp struct {
+	desc string
+	fn   func() error
 }
 
-func newManager(mqttCfg MQTTConfig, bc BlindConfig, client mqtt.Client, scanMu *sync.Mutex, poll time.Duration, logger *slog.Logger) *manager {
+// manager owns one blind: its BLE connection, MQTT topics and HA discovery.
+type manager struct {
+	cfg            BlindConfig
+	mqtt           MQTTConfig
+	id             string
+	t              topics
+	blind          *bliss.Blind
+	client         mqtt.Client
+	poll           time.Duration
+	idleDisconnect time.Duration // 0 = persistent connection; >0 = on-demand
+	actions        chan blindOp
+	log            *slog.Logger
+}
+
+func newManager(mqttCfg MQTTConfig, bc BlindConfig, client mqtt.Client, scanMu *sync.Mutex, poll, idleDisconnect time.Duration, logger *slog.Logger) *manager {
 	id := blindID(bc.MAC)
 	log := logger.With("blind", bc.Name, "mac", bc.MAC)
 	blind := bliss.New(bliss.Config{
@@ -127,14 +136,16 @@ func newManager(mqttCfg MQTTConfig, bc BlindConfig, client mqtt.Client, scanMu *
 		ScanMutex:  scanMu,
 	})
 	m := &manager{
-		cfg:    bc,
-		mqtt:   mqttCfg,
-		id:     id,
-		t:      blindTopics(mqttCfg.BaseTopic, id),
-		blind:  blind,
-		client: client,
-		poll:   poll,
-		log:    log,
+		cfg:            bc,
+		mqtt:           mqttCfg,
+		id:             id,
+		t:              blindTopics(mqttCfg.BaseTopic, id),
+		blind:          blind,
+		client:         client,
+		poll:           poll,
+		idleDisconnect: idleDisconnect,
+		actions:        make(chan blindOp, 8),
+		log:            log,
 	}
 	blind.OnEvent(m.onBLEEvent)
 	return m
@@ -154,10 +165,20 @@ func (m *manager) onMQTTConnect(c mqtt.Client) {
 	c.Subscribe(buttonCommandWildcard(m.mqtt.BaseTopic, m.id), 1, m.handleButton)
 }
 
-// run maintains the BLE connection: connect (with backoff), then poll status
-// until the link drops or the context is cancelled, then reconnect.
+// run drives the blind, either holding the connection open (persistent) or
+// connecting only on demand and dropping the link after an idle window.
 func (m *manager) run(ctx context.Context, wg *sync.WaitGroup) {
 	defer wg.Done()
+	if m.idleDisconnect > 0 {
+		m.runOnDemand(ctx)
+		return
+	}
+	m.runPersistent(ctx)
+}
+
+// runPersistent keeps a connection open, reconnecting with backoff on drops,
+// and polls status on the interval.
+func (m *manager) runPersistent(ctx context.Context) {
 	backoff := time.Second
 	for ctx.Err() == nil {
 		if err := m.blind.Connect(ctx); err != nil {
@@ -179,15 +200,13 @@ func (m *manager) run(ctx context.Context, wg *sync.WaitGroup) {
 		backoff = time.Second
 		m.log.Info("blind connected")
 		m.publishAvailability("online")
-		if err := m.blind.RequestStatus(); err != nil {
-			m.log.Debug("initial status request failed", "error", err)
-		}
+		m.requestStatus()
 		m.pollLoop(ctx)
 	}
 }
 
-// pollLoop periodically requests status (which also keeps the link warm) and
-// returns when the context is cancelled or a poll fails (link lost).
+// pollLoop serves queued commands and polls status until the context is
+// cancelled or a poll fails (link lost, prompting a reconnect in runPersistent).
 func (m *manager) pollLoop(ctx context.Context) {
 	ticker := time.NewTicker(m.poll)
 	defer ticker.Stop()
@@ -195,6 +214,10 @@ func (m *manager) pollLoop(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
+		case op := <-m.actions:
+			if err := op.fn(); err != nil {
+				m.log.Warn("command failed", "action", op.desc, "error", err)
+			}
 		case <-ticker.C:
 			if err := m.blind.RequestStatus(); err != nil {
 				m.log.Warn("status poll failed; will reconnect", "error", err)
@@ -203,6 +226,72 @@ func (m *manager) pollLoop(ctx context.Context) {
 				return
 			}
 		}
+	}
+}
+
+// runOnDemand keeps the BLE link disconnected while idle. It connects to run a
+// queued command or a periodic refresh, then drops the link after idleDisconnect
+// of inactivity — trading a few seconds of latency for much less battery use.
+func (m *manager) runOnDemand(ctx context.Context) {
+	m.publishAvailability("online") // optimistic; refined on each connect attempt
+	var refresh <-chan time.Time
+	if m.poll > 0 {
+		t := time.NewTicker(m.poll)
+		defer t.Stop()
+		refresh = t.C
+	}
+	idle := time.NewTimer(m.idleDisconnect)
+	idle.Stop()
+	defer m.blind.Disconnect()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case op := <-m.actions:
+			m.ensureConnected(ctx)
+			if err := op.fn(); err != nil {
+				m.log.Warn("command failed", "action", op.desc, "error", err)
+			}
+			m.requestStatus()
+			idle.Reset(m.idleDisconnect)
+		case <-refresh:
+			m.ensureConnected(ctx)
+			m.requestStatus()
+			idle.Reset(m.idleDisconnect)
+		case <-idle.C:
+			m.log.Debug("idle; disconnecting to save battery")
+			m.blind.Disconnect()
+		}
+	}
+}
+
+// ensureConnected connects if the link is down, updating availability.
+func (m *manager) ensureConnected(ctx context.Context) {
+	if m.blind.State().Connected {
+		return
+	}
+	if err := m.blind.Connect(ctx); err != nil {
+		m.log.Warn("connect failed", "error", err)
+		m.publishAvailability("offline")
+		return
+	}
+	m.publishAvailability("online")
+}
+
+// requestStatus asks the blind to report status (best effort).
+func (m *manager) requestStatus() {
+	if err := m.blind.RequestStatus(); err != nil {
+		m.log.Debug("status request failed", "error", err)
+	}
+}
+
+// submit queues a BLE action for the manager goroutine, dropping it (with a
+// warning) if the queue is somehow full.
+func (m *manager) submit(desc string, fn func() error) {
+	select {
+	case m.actions <- blindOp{desc, fn}:
+	default:
+		m.log.Warn("action queue full; dropping command", "action", desc)
 	}
 }
 
@@ -217,42 +306,31 @@ func (m *manager) onBLEEvent(ev bliss.Event) {
 }
 
 func (m *manager) handleCommand(_ mqtt.Client, msg mqtt.Message) {
-	cmd := strings.ToUpper(strings.TrimSpace(string(msg.Payload())))
-	var err error
-	switch cmd {
+	switch cmd := strings.ToUpper(strings.TrimSpace(string(msg.Payload()))); cmd {
 	case "OPEN":
-		err = m.blind.Open()
+		m.submit("open", m.blind.Open)
 	case "CLOSE":
-		err = m.blind.Close()
+		m.submit("close", m.blind.Close)
 	case "STOP":
-		err = m.blind.Stop()
+		m.submit("stop", m.blind.Stop)
 	default:
 		m.log.Warn("unknown cover command", "payload", cmd)
-		return
-	}
-	if err != nil {
-		m.log.Warn("command failed", "cmd", cmd, "error", err)
 	}
 }
 
 func (m *manager) handleButton(_ mqtt.Client, msg mqtt.Message) {
 	key := buttonKeyFromTopic(msg.Topic())
-	var err error
 	switch key {
 	case "fast_up":
-		err = m.blind.Open()
+		m.submit("fast_up", m.blind.Open)
 	case "fast_down":
-		err = m.blind.Close()
+		m.submit("fast_down", m.blind.Close)
 	case "slow_up":
-		err = m.blind.FineUp()
+		m.submit("slow_up", m.blind.FineUp)
 	case "slow_down":
-		err = m.blind.FineDown()
+		m.submit("slow_down", m.blind.FineDown)
 	default:
 		m.log.Warn("unknown button", "key", key)
-		return
-	}
-	if err != nil {
-		m.log.Warn("button action failed", "key", key, "error", err)
 	}
 }
 
@@ -262,9 +340,9 @@ func (m *manager) handleSetPosition(_ mqtt.Client, msg mqtt.Message) {
 		m.log.Warn("invalid set_position payload", "payload", string(msg.Payload()))
 		return
 	}
-	if err := m.blind.SetPosition(toDevice(ha, m.cfg.Invert)); err != nil {
-		m.log.Warn("set position failed", "error", err)
-	}
+	m.submit("set_position", func() error {
+		return m.blind.SetPosition(toDevice(ha, m.cfg.Invert))
+	})
 }
 
 func (m *manager) publishAvailability(state string) {

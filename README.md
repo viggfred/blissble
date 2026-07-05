@@ -121,6 +121,14 @@ blinds:
     mac: AA:BB:CC:DD:EE:FF
 ```
 
+**Battery saving.** By default `blissha` holds a persistent BLE connection. The
+connection itself — not the polling — is what costs battery, so set
+`idle_disconnect` (e.g. `30s`) to switch to **on-demand mode**: the link is kept
+disconnected while idle and only opened to run a command or a refresh, then
+dropped again. Commands then take a few extra seconds (scan + connect), which is
+fine for scenes/automations. In on-demand mode raise `poll_interval` (e.g. `1h`)
+so status refreshes — and their reconnects — stay infrequent.
+
 ### Run (podman / docker)
 
 The bridge talks to the host's BlueZ over the system D-Bus socket, so mount that
@@ -204,8 +212,7 @@ encode the target the same way as *Go to position* (single-bar motors like HD130
 |--------|----------------|---------|
 | `D4`   | login result   | byte[2] > 0 ⇒ success |
 | `D3`   | password set   | byte[2] > 0 ⇒ success |
-| `D2`   | status report  | byte[1]=flags, byte[2]=position; `flags & 0x18`: 0=battery ok, 0x10=low, 0x18=none; bit0=direction, bit1=limit-setting, bit2=remote-link |
-| `D1`   | readStatus reply | byte[2]=position %, byte[3..4]=raw position (LE) |
+| `D1` / `D2` | status (readStatus reply / pushed report — same layout) | byte[1]=flags, byte[2]=position %, byte[3..4]=raw position (LE); `flags & 0x18`: `0x00`=battery normal, `0x08`=low, `0x10`=none; bit0=reverse-config (not live direction), bit1=limit-set, bit2=remote-link |
 | `D6`   | next free timer slot | byte[2]=slot index |
 | `D7`   | add-timer result | byte[2] > 0 ⇒ success |
 | `D8`   | delete-timer result | byte[2] > 0 ⇒ success |
