@@ -80,19 +80,19 @@ func TestParseLoginResponse(t *testing.T) {
 }
 
 func TestParseStatusResponse(t *testing.T) {
-	// FF 01 02 03 D2 <flags=0x11> <pos=0x40>: dir bit set, low battery.
-	ev, ok := ParseResponse(mustHex(t, "ff010203d21140"))
+	// FF 01 02 03 D2 <flags=0x09> <pos=0x40>: reverse bit set, low battery (0x08).
+	ev, ok := ParseResponse(mustHex(t, "ff010203d20940"))
 	if !ok || ev.Type != EventStatus {
 		t.Fatalf("status parse: ok=%v ev=%+v", ok, ev)
 	}
 	if ev.Position != 0x40 {
 		t.Errorf("position = %d, want 64", ev.Position)
 	}
-	if ev.Battery != BatteryLow {
+	if ev.Battery != BatteryLow || !ev.HasBattery {
 		t.Errorf("battery = %v, want low", ev.Battery)
 	}
-	if !ev.Direction {
-		t.Errorf("direction should be set")
+	if !ev.Reversed {
+		t.Errorf("reverse bit should be set")
 	}
 }
 
@@ -167,25 +167,44 @@ func TestParseD1StatusReply(t *testing.T) {
 	if ev.PositionRaw != 750 {
 		t.Errorf("positionRaw = %d, want 750", ev.PositionRaw)
 	}
-	if ev.HasBattery {
-		t.Errorf("D1 reply should not claim battery info")
+	// D1 carries battery in the flags byte too (0x02 & 0x18 == 0 -> normal).
+	if !ev.HasBattery || ev.Battery != BatteryNormal {
+		t.Errorf("D1 battery = %v (hasBattery=%v), want normal", ev.Battery, ev.HasBattery)
 	}
 }
 
 func TestParseD2BatteryAndRaw(t *testing.T) {
-	// D2 flags 0x18 => battery none; position at [2], raw at [3..4] (LE).
-	ev, ok := ParseResponse(mustHex(t, "ff010203d2186414e8"))
+	// D2 flags 0x10 => battery none; position % at [2], raw 16-bit LE at [3..4].
+	ev, ok := ParseResponse(mustHex(t, "ff010203d21064e803"))
 	if !ok || ev.Type != EventStatus || !ev.HasBattery {
 		t.Fatalf("D2 parse: ok=%v ev=%+v", ok, ev)
 	}
 	if ev.Battery != BatteryNone {
 		t.Errorf("battery = %v, want none", ev.Battery)
 	}
-	if ev.Position != 0x64 {
+	if ev.Position != 100 {
 		t.Errorf("position = %d, want 100", ev.Position)
 	}
-	if ev.PositionRaw != 0xE814 {
-		t.Errorf("positionRaw = %#x, want 0xe814", ev.PositionRaw)
+	if ev.PositionRaw != 1000 {
+		t.Errorf("positionRaw = %d, want 1000", ev.PositionRaw)
+	}
+}
+
+func TestParseCapturedD1(t *testing.T) {
+	// Real readStatus reply captured from an HD1300: position 99% (raw 999),
+	// flags 0x02 => reverse off, battery normal.
+	ev, ok := ParseResponse(mustHex(t, "ff010203d10263e703ce1fb3"))
+	if !ok || ev.Type != EventStatus {
+		t.Fatalf("parse: ok=%v ev=%+v", ok, ev)
+	}
+	if ev.Position != 99 || ev.PositionRaw != 999 {
+		t.Errorf("position=%d raw=%d, want 99/999", ev.Position, ev.PositionRaw)
+	}
+	if !ev.HasBattery || ev.Battery != BatteryNormal {
+		t.Errorf("battery=%v hasBattery=%v, want normal", ev.Battery, ev.HasBattery)
+	}
+	if ev.Reversed {
+		t.Errorf("reversed should be false")
 	}
 }
 

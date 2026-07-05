@@ -47,8 +47,8 @@ func main() {
 	blind.OnEvent(func(ev bliss.Event) {
 		switch ev.Type {
 		case bliss.EventStatus:
-			fmt.Printf("\n[status] position=%d  battery=%s  direction=%v\nblissble> ",
-				ev.Position, ev.Battery, ev.Direction)
+			fmt.Printf("\n[status] position=%d  battery=%s  reversed=%v\nblissble> ",
+				ev.Position, ev.Battery, ev.Reversed)
 		case bliss.EventTimerSet:
 			fmt.Printf("\n[timer] set: success=%v\nblissble> ", ev.Success)
 		case bliss.EventTimerDelete:

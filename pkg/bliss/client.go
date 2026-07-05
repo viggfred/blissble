@@ -37,7 +37,7 @@ type State struct {
 	LoggedIn  bool
 	Position  uint8
 	Battery   BatteryLevel
-	Direction bool
+	Reversed  bool // motor direction-reverse config flag (not live movement)
 }
 
 // Blind is a client for a single Bliss Smart Blinds motor over BLE. It is safe
@@ -233,7 +233,7 @@ func applyEvent(s State, ev Event) State {
 	switch ev.Type {
 	case EventStatus:
 		s.Position = ev.Position
-		s.Direction = ev.Direction
+		s.Reversed = ev.Reversed
 		if ev.HasBattery {
 			s.Battery = ev.Battery
 		}

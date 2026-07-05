@@ -3,9 +3,9 @@ package bliss
 import "testing"
 
 func TestApplyEvent(t *testing.T) {
-	// A status event updates position, direction and battery.
-	s := applyEvent(State{}, Event{Type: EventStatus, Position: 42, Direction: true, HasBattery: true, Battery: BatteryLow})
-	if s.Position != 42 || !s.Direction || s.Battery != BatteryLow {
+	// A status event updates position, reversed-flag and battery.
+	s := applyEvent(State{}, Event{Type: EventStatus, Position: 42, Reversed: true, HasBattery: true, Battery: BatteryLow})
+	if s.Position != 42 || !s.Reversed || s.Battery != BatteryLow {
 		t.Fatalf("status apply = %+v", s)
 	}
 

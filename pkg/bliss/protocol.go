@@ -244,7 +244,7 @@ type Event struct {
 	// EventStatus fields:
 	Position     uint8  // device-reported position percentage (0..100)
 	PositionRaw  uint16 // raw position in motor-range units (0..Range), when present
-	Direction    bool
+	Reversed     bool   // motor direction-reverse config flag (NOT live movement direction)
 	LimitSetting bool
 	RemoteLink   bool
 	Battery      BatteryLevel
@@ -270,36 +270,28 @@ func ParseResponse(frame []byte) (Event, bool) {
 	op := payload[0]
 	e := Event{Opcode: op, Raw: clone(frame)}
 	switch op {
-	case 0xD2: // pushed status report: flags at [1], position % at [2]
+	case 0xD1, 0xD2: // status: the readStatus reply (D1) and pushed report (D2) share a layout
 		if len(payload) < 3 {
 			return Event{}, false
 		}
 		flags := payload[1]
 		e.Type = EventStatus
-		e.Position = payload[2]
-		e.Direction = flags&0x01 != 0
+		e.Position = payload[2] // percentage; a 16-bit raw value follows at [3:5]
+		e.Reversed = flags&0x01 != 0
 		e.LimitSetting = flags&0x02 != 0
 		e.RemoteLink = flags&0x04 != 0
 		e.HasBattery = true
+		// Battery is encoded in flags bits 3-4 (matches the app's gen2 parser).
 		switch flags & 0x18 {
 		case 0x00:
 			e.Battery = BatteryNormal
-		case 0x10:
+		case 0x08:
 			e.Battery = BatteryLow
-		case 0x18:
+		case 0x10:
 			e.Battery = BatteryNone
 		default:
 			e.Battery = BatteryUnknown
 		}
-		if len(payload) >= 5 {
-			e.PositionRaw = uint16(payload[3]) | uint16(payload[4])<<8
-		}
-	case 0xD1: // readStatus reply: position % at [2], raw 16-bit at [3:5]
-		if len(payload) < 3 {
-			return Event{}, false
-		}
-		e.Type = EventStatus
-		e.Position = payload[2]
 		if len(payload) >= 5 {
 			e.PositionRaw = uint16(payload[3]) | uint16(payload[4])<<8
 		}
