@@ -349,7 +349,9 @@ func (m *manager) runOp(ctx context.Context, op blindOp) {
 // and clears the opening/closing indication instead of getting stuck.
 func (m *manager) trackUntilSettled(ctx context.Context) {
 	const step = 2 * time.Second
-	deadline := time.Now().Add(30 * time.Second)
+	// Generous cap: a full traverse can take ~40s. Movement normally ends earlier
+	// via the end-stop / stable-position checks below.
+	deadline := time.Now().Add(90 * time.Second)
 	last, stable := -1, 0
 	for time.Now().Before(deadline) {
 		m.ensureConnected(ctx)
