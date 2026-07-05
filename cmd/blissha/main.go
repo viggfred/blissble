@@ -124,8 +124,10 @@ func main() {
 // blindOp is a BLE action queued by an MQTT handler and executed on the
 // manager's goroutine (so connect/idle handling stays in one place).
 type blindOp struct {
-	desc string
-	fn   func() error
+	desc  string
+	fn    func() error
+	state string // HA cover state to announce before running (e.g. "opening"); "" = none
+	track bool   // poll position until the blind settles, so HA sees it stop
 }
 
 // manager owns one blind: its BLE connection, MQTT topics and HA discovery.
@@ -217,7 +219,7 @@ func (m *manager) runPersistent(ctx context.Context) {
 		backoff = time.Second
 		m.log.Info("blind connected")
 		m.publishAvailability("online")
-		m.requestStatus()
+		_ = m.refreshState(ctx)
 		m.pollLoop(ctx)
 	}
 }
@@ -232,11 +234,9 @@ func (m *manager) pollLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case op := <-m.actions:
-			if err := op.fn(); err != nil {
-				m.log.Warn("command failed", "action", op.desc, "error", err)
-			}
+			m.runOp(ctx, op)
 		case <-ticker.C:
-			if err := m.blind.RequestStatus(); err != nil {
+			if err := m.refreshState(ctx); err != nil {
 				m.log.Warn("status poll failed; will reconnect", "error", err)
 				m.publishAvailability("offline")
 				m.blind.Disconnect()
@@ -263,8 +263,7 @@ func (m *manager) runOnDemand(ctx context.Context) {
 
 	// Connect once at startup so Home Assistant gets current position/battery
 	// immediately, rather than waiting for the first refresh tick.
-	m.ensureConnected(ctx)
-	m.requestStatus()
+	_ = m.refreshState(ctx)
 	idle.Reset(m.idleDisconnect)
 
 	for {
@@ -272,15 +271,10 @@ func (m *manager) runOnDemand(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case op := <-m.actions:
-			m.ensureConnected(ctx)
-			if err := op.fn(); err != nil {
-				m.log.Warn("command failed", "action", op.desc, "error", err)
-			}
-			m.requestStatus()
+			m.runOp(ctx, op)
 			idle.Reset(m.idleDisconnect)
 		case <-refresh:
-			m.ensureConnected(ctx)
-			m.requestStatus()
+			_ = m.refreshState(ctx)
 			idle.Reset(m.idleDisconnect)
 		case <-idle.C:
 			m.log.Debug("idle; disconnecting to save battery")
@@ -309,13 +303,92 @@ func (m *manager) requestStatus() {
 	}
 }
 
+// refreshState reads status and publishes the resting cover state, so HA always
+// has a defined state (open/closed) rather than "unknown".
+func (m *manager) refreshState(ctx context.Context) error {
+	m.ensureConnected(ctx)
+	if err := m.blind.RequestStatus(); err != nil {
+		return err
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(500 * time.Millisecond): // let the reply arrive
+	}
+	m.publishState(m.settledState())
+	return nil
+}
+
 // submit queues a BLE action for the manager goroutine, dropping it (with a
 // warning) if the queue is somehow full.
-func (m *manager) submit(desc string, fn func() error) {
+func (m *manager) submit(op blindOp) {
 	select {
-	case m.actions <- blindOp{desc, fn}:
+	case m.actions <- op:
 	default:
-		m.log.Warn("action queue full; dropping command", "action", desc)
+		m.log.Warn("action queue full; dropping command", "action", op.desc)
+	}
+}
+
+// runOp executes a queued action: announce its cover state, run it, then either
+// track the blind until it settles (movement) or just refresh status.
+func (m *manager) runOp(ctx context.Context, op blindOp) {
+	m.ensureConnected(ctx) // no-op if already connected (persistent mode)
+	m.publishState(op.state)
+	if err := op.fn(); err != nil {
+		m.log.Warn("command failed", "action", op.desc, "error", err)
+	}
+	if op.track {
+		m.trackUntilSettled(ctx)
+	} else {
+		_ = m.refreshState(ctx)
+	}
+}
+
+// trackUntilSettled polls position after a movement command until the blind
+// stops (position at an end or unchanged for two reads) or a timeout, then
+// publishes the final state — so Home Assistant sees the cover reach its target
+// and clears the opening/closing indication instead of getting stuck.
+func (m *manager) trackUntilSettled(ctx context.Context) {
+	const step = 2 * time.Second
+	deadline := time.Now().Add(30 * time.Second)
+	last, stable := -1, 0
+	for time.Now().Before(deadline) {
+		m.ensureConnected(ctx)
+		m.requestStatus() // -> onBLEEvent publishes the updated position
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(step): // wait for the reply plus some travel
+		}
+		cur := int(m.blind.State().Position)
+		if cur == 0 || cur == 100 { // hit an end stop
+			break
+		}
+		if cur == last {
+			if stable++; stable >= 2 {
+				break
+			}
+		} else {
+			last, stable = cur, 0
+		}
+	}
+	m.publishState(m.settledState())
+}
+
+// settledState maps the last known position to a resting cover state.
+func (m *manager) settledState() string {
+	switch ha := toHA(m.blind.State().Position, m.cfg.Invert); {
+	case ha >= 100:
+		return "open"
+	case ha <= 0:
+		return "closed"
+	default:
+		return "stopped"
+	}
+}
+
+func (m *manager) publishState(s string) {
+	if s != "" {
+		m.client.Publish(m.t.state, 1, true, s)
 	}
 }
 
@@ -332,11 +405,11 @@ func (m *manager) onBLEEvent(ev bliss.Event) {
 func (m *manager) handleCommand(_ mqtt.Client, msg mqtt.Message) {
 	switch cmd := strings.ToUpper(strings.TrimSpace(string(msg.Payload()))); cmd {
 	case "OPEN":
-		m.submit("open", m.blind.Open)
+		m.submit(blindOp{desc: "open", fn: m.blind.Open, state: "opening", track: true})
 	case "CLOSE":
-		m.submit("close", m.blind.Close)
+		m.submit(blindOp{desc: "close", fn: m.blind.Close, state: "closing", track: true})
 	case "STOP":
-		m.submit("stop", m.blind.Stop)
+		m.submit(blindOp{desc: "stop", fn: m.blind.Stop, state: "stopped"})
 	default:
 		m.log.Warn("unknown cover command", "payload", cmd)
 	}
@@ -346,13 +419,13 @@ func (m *manager) handleButton(_ mqtt.Client, msg mqtt.Message) {
 	key := buttonKeyFromTopic(msg.Topic())
 	switch key {
 	case "fast_up":
-		m.submit("fast_up", m.blind.Open)
+		m.submit(blindOp{desc: "fast_up", fn: m.blind.Open, state: "opening", track: true})
 	case "fast_down":
-		m.submit("fast_down", m.blind.Close)
+		m.submit(blindOp{desc: "fast_down", fn: m.blind.Close, state: "closing", track: true})
 	case "slow_up":
-		m.submit("slow_up", m.blind.FineUp)
+		m.submit(blindOp{desc: "slow_up", fn: m.blind.FineUp, state: "opening", track: true})
 	case "slow_down":
-		m.submit("slow_down", m.blind.FineDown)
+		m.submit(blindOp{desc: "slow_down", fn: m.blind.FineDown, state: "closing", track: true})
 	default:
 		m.log.Warn("unknown button", "key", key)
 	}
@@ -364,8 +437,15 @@ func (m *manager) handleSetPosition(_ mqtt.Client, msg mqtt.Message) {
 		m.log.Warn("invalid set_position payload", "payload", string(msg.Payload()))
 		return
 	}
-	m.submit("set_position", func() error {
-		return m.blind.SetPosition(toDevice(ha, m.cfg.Invert))
+	state := "opening"
+	if ha < toHA(m.blind.State().Position, m.cfg.Invert) {
+		state = "closing"
+	}
+	m.submit(blindOp{
+		desc:  "set_position",
+		fn:    func() error { return m.blind.SetPosition(toDevice(ha, m.cfg.Invert)) },
+		state: state,
+		track: true,
 	})
 }
 

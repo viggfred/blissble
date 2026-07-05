@@ -54,6 +54,8 @@ func TestCoverDiscoveryPayload(t *testing.T) {
 		"command_topic":      "blissble/aabbccddee01/set",
 		"position_topic":     "blissble/aabbccddee01/position",
 		"set_position_topic": "blissble/aabbccddee01/set_position",
+		"state_topic":        "blissble/aabbccddee01/state",
+		"state_opening":      "opening",
 		"position_open":      float64(100),
 		"position_closed":    float64(0),
 		"device_class":       "shade",

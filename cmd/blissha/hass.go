@@ -12,6 +12,7 @@ type topics struct {
 	command      string
 	position     string
 	setPosition  string
+	state        string
 	battery      string
 }
 
@@ -22,6 +23,7 @@ func blindTopics(base, id string) topics {
 		command:      p + "/set",
 		position:     p + "/position",
 		setPosition:  p + "/set_position",
+		state:        p + "/state",
 		battery:      p + "/battery",
 	}
 }
@@ -118,16 +120,24 @@ func buttonDiscoveryPayload(mqtt MQTTConfig, b BlindConfig, id, key, name string
 func coverDiscoveryPayload(mqtt MQTTConfig, b BlindConfig, id string) []byte {
 	t := blindTopics(mqtt.BaseTopic, id)
 	cfg := map[string]any{
-		"name":                  nil, // use the device name
-		"unique_id":             "blissble_" + id + "_cover",
-		"command_topic":         t.command,
-		"payload_open":          "OPEN",
-		"payload_close":         "CLOSE",
-		"payload_stop":          "STOP",
-		"position_topic":        t.position,
-		"set_position_topic":    t.setPosition,
-		"position_open":         100,
-		"position_closed":       0,
+		"name":               nil, // use the device name
+		"unique_id":          "blissble_" + id + "_cover",
+		"command_topic":      t.command,
+		"payload_open":       "OPEN",
+		"payload_close":      "CLOSE",
+		"payload_stop":       "STOP",
+		"position_topic":     t.position,
+		"set_position_topic": t.setPosition,
+		"position_open":      100,
+		"position_closed":    0,
+		// Explicit state so HA shows opening/closing and settles the arrows
+		// instead of getting stuck after a press.
+		"state_topic":           t.state,
+		"state_open":            "open",
+		"state_opening":         "opening",
+		"state_closed":          "closed",
+		"state_closing":         "closing",
+		"state_stopped":         "stopped",
 		"availability_mode":     "all",
 		"payload_available":     "online",
 		"payload_not_available": "offline",
