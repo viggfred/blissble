@@ -343,37 +343,52 @@ func (m *manager) runOp(ctx context.Context, op blindOp) {
 	}
 }
 
-// trackUntilSettled polls position after a movement command until the blind
-// stops (position at an end or unchanged for two reads) or a timeout, then
-// publishes the final state — so Home Assistant sees the cover reach its target
-// and clears the opening/closing indication instead of getting stuck.
+// trackUntilSettled follows the blind after a movement command (open/close are
+// continuous "travel to the limit" commands that can take ~40s), publishing
+// position as it travels, until it stops moving — the position is unchanged for
+// two consecutive polls — or a safety timeout. It then publishes the resting
+// state so HA clears the opening/closing indication.
+//
+// It deliberately does NOT treat the *starting* end position as "settled" (that
+// bug made an open-from-closed bounce straight back to closed), and it stays
+// responsive: a new command (stop, or reverse) interrupts and is applied.
 func (m *manager) trackUntilSettled(ctx context.Context) {
-	const step = 2 * time.Second
-	// Generous cap: a full traverse can take ~40s. Movement normally ends earlier
-	// via the end-stop / stable-position checks below.
-	deadline := time.Now().Add(90 * time.Second)
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	timeout := time.After(90 * time.Second) // safety cap; movement normally ends sooner
 	last, stable := -1, 0
-	for time.Now().Before(deadline) {
-		m.ensureConnected(ctx)
-		m.requestStatus() // -> onBLEEvent publishes the updated position
+	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(step): // wait for the reply plus some travel
-		}
-		cur := int(m.blind.State().Position)
-		if cur == 0 || cur == 100 { // hit an end stop
-			break
-		}
-		if cur == last {
-			if stable++; stable >= 2 {
-				break
+		case op := <-m.actions:
+			m.ensureConnected(ctx)
+			m.publishState(op.state)
+			if err := op.fn(); err != nil {
+				m.log.Warn("command failed", "action", op.desc, "error", err)
 			}
-		} else {
-			last, stable = cur, 0
+			if !op.track { // e.g. stop: settle immediately
+				m.publishState(m.settledState())
+				return
+			}
+			last, stable = -1, 0 // restart settle detection for the new movement
+		case <-ticker.C:
+			m.ensureConnected(ctx)
+			m.requestStatus() // -> onBLEEvent publishes the fresh position
+			cur := int(m.blind.State().Position)
+			if cur == last {
+				if stable++; stable >= 2 {
+					m.publishState(m.settledState())
+					return
+				}
+			} else {
+				last, stable = cur, 0
+			}
+		case <-timeout:
+			m.publishState(m.settledState())
+			return
 		}
 	}
-	m.publishState(m.settledState())
 }
 
 // settledState maps the last known position to a resting cover state.
