@@ -59,11 +59,17 @@ func New(cfg Config, logger *slog.Logger) (*Bridge, error) {
 	}
 	b.client = mqtt.NewClient(opts)
 
-	// Cache one Adapter and one scan mutex per physical dongle (keyed by hci id),
-	// so blinds on the same adapter serialize scans while different adapters scan
-	// in parallel.
+	// Cache one Adapter per physical dongle (keyed by hci id). All blinds share a
+	// SINGLE scan mutex so only one BLE scan runs at a time across every adapter.
+	// This is required, not just an optimization: tinygo/x/bluetooth's Linux Scan
+	// watches the org.bluez.Adapter1 "Discovering" property without filtering by
+	// adapter path, so when a scan on one adapter finishes and stops discovery, a
+	// scan running concurrently on a *different* adapter aborts with "scan was
+	// stopped unexpectedly" and leaks its discovery ("Operation already in
+	// progress"). Serializing scans avoids the overlap entirely. Connects still
+	// run in parallel; scans are brief.
 	adapters := map[string]*bluetooth.Adapter{}
-	scanMus := map[string]*sync.Mutex{}
+	scanMu := &sync.Mutex{}
 	for _, bc := range cfg.Blinds {
 		id, err := resolveHCI(bc.Adapter)
 		if err != nil {
@@ -74,9 +80,8 @@ func New(cfg Config, logger *slog.Logger) (*Bridge, error) {
 		if !ok {
 			adapter = bluetooth.NewAdapter(id)
 			adapters[id] = adapter
-			scanMus[id] = &sync.Mutex{}
 		}
-		mgr := newManager(cfg.MQTT, bc, cfg.Location, b.client, adapter, scanMus[id], cfg.Poll, cfg.IdleDisconnect, logger)
+		mgr := newManager(cfg.MQTT, bc, cfg.Location, b.client, adapter, scanMu, cfg.Poll, cfg.IdleDisconnect, logger)
 		b.managers = append(b.managers, mgr)
 		b.byID[mgr.id] = mgr
 	}

@@ -25,9 +25,11 @@ type Config struct {
 	Logger *slog.Logger
 	// ScanTimeout bounds discovery per Connect. Defaults to 20s.
 	ScanTimeout time.Duration
-	// ScanMutex, if set, is held for the duration of each BLE scan. The adapter
-	// permits only one scan at a time, so share one mutex across all Blind
-	// instances that use the same adapter to serialize their scans/reconnects.
+	// ScanMutex, if set, is held for the duration of each BLE scan. Share one
+	// mutex across all Blind instances so only one scan runs at a time — BlueZ
+	// permits one scan per adapter, and the tinygo/x/bluetooth Linux scanner
+	// additionally cross-talks between adapters (a scan stopping on one adapter
+	// aborts a concurrent scan on another), so a single shared mutex is safest.
 	ScanMutex *sync.Mutex
 }
 
