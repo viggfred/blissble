@@ -31,6 +31,15 @@ poll_interval: 30s
 # frugal command-only operation.
 # idle_disconnect: 30s
 
+# Optional home location, used by sun-based automation (below) and schedule
+# solar clamps. Required if any blind uses a sun/schedule mode. The timezone is
+# an explicit IANA name (the zone database is embedded, so it works in a bare
+# container) — there is NO fallback to the system default, which is usually UTC.
+# location:
+#   latitude: 59.9139
+#   longitude: 10.7522
+#   timezone: Europe/Oslo
+
 # Zero or more blinds. Each becomes an HA Cover (+ battery sensor and
 # fast/slow up/down buttons), grouped as one HA device.
 blinds:
@@ -40,6 +49,30 @@ blinds:
     # password: xxxxxx         # optional; defaults to the built-in key
     # invert: false            # set true if open/closed are swapped in HA
     # adapter: "84:5C:F3:EC:8B:4F"  # which BT dongle to use (see below)
+    #
+    # Optional sun automation. Keeps direct sun off the TV/sofa when the room is
+    # occupied. Glare matters most for east/west windows (low morning/evening
+    # sun); a high midday south sun barely penetrates and stays open.
+    # automation:
+    #   mode: sun_glare               # off | sun_glare | sun_shade | schedule | thermal
+    #   window:
+    #     azimuth: 270                # compass direction the window faces (0=N,90=E,180=S,270=W)
+    #     sensitivity: 0.6            # simple knob 0..1 (higher = shades more)
+    #     # bottom_up: false          # true for bottom-up rollers (aperture at the top)
+    #     # Or give exact geometry instead of sensitivity, for a precise cut-off:
+    #     # height_m: 1.4             # window height
+    #     # sill_m: 0.9               # sill height above the floor
+    #     # protected_depth_m: 2.0    # keep sun off out to this depth (e.g. the sofa/TV)
+    #     # protected_height_m: 1.1   # ...at this height
+    #   require_occupancy: true       # only shade when the room is occupied (see embed API)
+    #   when_unoccupied: thermal      # off | thermal | sun_shade when nobody's in the room
+    #   # lux: { engage_above: 40000, disengage_below: 25000 }  # only shade when actually bright
+    #   # deadband: 5                 # don't move for target changes under this %
+    #   # step: 5                     # quantize target to this many %
+    #   # min_move_interval: 10m      # min time between automated moves
+    #   # max_moves_per_hour: 8       # hard anti-churn cap
+    #   # override_timeout: 2h        # pause automation this long after a manual/RF move
+    #   # recompute: 5m               # how often to re-evaluate (evaluation is BLE-free)
 
   - name: Bedroom
     mac: AA:BB:CC:DD:EE:FF
@@ -47,3 +80,17 @@ blinds:
     # dongle's own Bluetooth MAC (stable) over "hciN" (numbering can swap on
     # reboot). Omit to use the default adapter (hci0).
     # adapter: "00:1A:7D:11:22:33"
+    #
+    # A clock schedule (decoupled from the sun — right for high latitudes) with a
+    # gentle wake ramp. Optional solar clamps keep it sane year-round.
+    # automation:
+    #   mode: schedule
+    #   schedule:
+    #     - days: [mon, tue, wed, thu, fri]   # or [weekdays] / [weekend] / [daily]
+    #       close_at: "22:30"                 # go to sleep position
+    #       open_at: "07:00"                  # start opening
+    #       sleep: 0                          # position while asleep (default 0)
+    #       open: 100                         # position when awake (default 100)
+    #       ramp: 20m                         # open gradually over 20 min (sunrise sim)
+    #       not_before_sunrise: true          # don't open before actual sunrise
+    #       # not_after_sunset: true          # don't close before actual sunset

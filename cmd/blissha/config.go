@@ -5,6 +5,8 @@ import (
 	"crypto/x509"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -15,10 +17,17 @@ import (
 // fileConfig mirrors the on-disk YAML. LoadConfig converts it to the plain-struct
 // blissha.Config the library consumes, keeping all YAML/CLI concerns here.
 type fileConfig struct {
-	MQTT           mqttFile    `yaml:"mqtt"`
-	Poll           *Duration   `yaml:"poll_interval"` // nil = unset (mode default); 0 = command-only
-	IdleDisconnect Duration    `yaml:"idle_disconnect"`
-	Blinds         []blindFile `yaml:"blinds"`
+	MQTT           mqttFile      `yaml:"mqtt"`
+	Poll           *Duration     `yaml:"poll_interval"` // nil = unset (mode default); 0 = command-only
+	IdleDisconnect Duration      `yaml:"idle_disconnect"`
+	Location       *locationFile `yaml:"location"`
+	Blinds         []blindFile   `yaml:"blinds"`
+}
+
+type locationFile struct {
+	Latitude  float64 `yaml:"latitude"`
+	Longitude float64 `yaml:"longitude"`
+	Timezone  string  `yaml:"timezone"` // IANA name, e.g. Europe/Oslo (no system-default fallback)
 }
 
 type mqttFile struct {
@@ -39,12 +48,81 @@ type tlsFile struct {
 }
 
 type blindFile struct {
-	Name        string `yaml:"name"`
-	MAC         string `yaml:"mac"`
-	Password    string `yaml:"password"`     // optional; defaults to the built-in key
-	Invert      bool   `yaml:"invert"`       // flip position if open/closed are swapped in HA
-	DeviceClass string `yaml:"device_class"` // optional HA cover device_class
-	Adapter     string `yaml:"adapter"`      // "", "hciN", or the adapter's Bluetooth MAC
+	Name        string          `yaml:"name"`
+	MAC         string          `yaml:"mac"`
+	Password    string          `yaml:"password"`     // optional; defaults to the built-in key
+	Invert      bool            `yaml:"invert"`       // flip position if open/closed are swapped in HA
+	DeviceClass string          `yaml:"device_class"` // optional HA cover device_class
+	Adapter     string          `yaml:"adapter"`      // "", "hciN", or the adapter's Bluetooth MAC
+	Automation  *automationFile `yaml:"automation"`
+}
+
+// automationFile mirrors the per-blind automation: block.
+type automationFile struct {
+	Mode             string              `yaml:"mode"` // off|sun_glare|sun_shade|schedule|thermal
+	Window           *windowFile         `yaml:"window"`
+	ShadeClosed      *int                `yaml:"shade_closed"` // pointer: 0 is a valid (full-close) value
+	Schedule         []scheduleEntryFile `yaml:"schedule"`
+	Thermal          *thermalFile        `yaml:"thermal"`
+	PresenceSim      *presenceSimFile    `yaml:"presence_sim"`
+	Privacy          *privacyFile        `yaml:"privacy"`
+	Lux              *luxFile            `yaml:"lux"`
+	RequireOccupancy bool                `yaml:"require_occupancy"`
+	WhenUnoccupied   string              `yaml:"when_unoccupied"`
+	Recompute        Duration            `yaml:"recompute"`
+	MinMoveInterval  Duration            `yaml:"min_move_interval"`
+	OverrideTimeout  Duration            `yaml:"override_timeout"`
+	Deadband         int                 `yaml:"deadband"`
+	Step             int                 `yaml:"step"`
+	MaxMovesPerHour  int                 `yaml:"max_moves_per_hour"`
+	MinAltitude      float64             `yaml:"min_altitude"`
+}
+
+type windowFile struct {
+	Azimuth          float64 `yaml:"azimuth"`
+	BottomUp         bool    `yaml:"bottom_up"`
+	HeightM          float64 `yaml:"height_m"`
+	SillM            float64 `yaml:"sill_m"`
+	ProtectedDepthM  float64 `yaml:"protected_depth_m"`
+	ProtectedHeightM float64 `yaml:"protected_height_m"`
+	Sensitivity      float64 `yaml:"sensitivity"`
+}
+
+type scheduleEntryFile struct {
+	Days             daysYAML  `yaml:"days"`
+	CloseAt          clockYAML `yaml:"close_at"`
+	OpenAt           clockYAML `yaml:"open_at"`
+	Sleep            int       `yaml:"sleep"`
+	Open             int       `yaml:"open"`
+	Ramp             Duration  `yaml:"ramp"`
+	NotBeforeSunrise bool      `yaml:"not_before_sunrise"`
+	NotAfterSunset   bool      `yaml:"not_after_sunset"`
+}
+
+type thermalFile struct {
+	SummerClose *int     `yaml:"summer_close"` // pointer: 0 (full close) is valid
+	WinterOpen  int      `yaml:"winter_open"`
+	HotTempC    *float64 `yaml:"hot_temp_c"`  // pointer: 0 °C is a valid threshold
+	ColdTempC   *float64 `yaml:"cold_temp_c"` // pointer: 0 °C is a valid threshold
+}
+
+type presenceSimFile struct {
+	Enabled      bool      `yaml:"enabled"`
+	MorningOpen  clockYAML `yaml:"morning_open"`
+	EveningClose clockYAML `yaml:"evening_close"`
+	Open         int       `yaml:"open"`
+	Close        int       `yaml:"close"`
+}
+
+type privacyFile struct {
+	AfterDark    bool `yaml:"after_dark"`
+	Close        int  `yaml:"close"`
+	OccupiedOnly bool `yaml:"occupied_only"`
+}
+
+type luxFile struct {
+	EngageAbove    float64 `yaml:"engage_above"`
+	DisengageBelow float64 `yaml:"disengage_below"`
 }
 
 // LoadConfig reads the YAML file at path and returns a ready blissha.Config
@@ -93,17 +171,112 @@ func LoadConfig(path string) (blissha.Config, error) {
 		cfg.MQTT.TLS = tlsCfg
 	}
 
+	if fc.Location != nil {
+		loc := &blissha.Location{Lat: fc.Location.Latitude, Lon: fc.Location.Longitude}
+		if tz := strings.TrimSpace(fc.Location.Timezone); tz != "" {
+			// Explicit IANA zone only; never fall back to the system default (a
+			// container is usually UTC, which would fire schedules hours off). The
+			// zone database is embedded via the time/tzdata import in main.go.
+			z, err := time.LoadLocation(tz)
+			if err != nil {
+				return blissha.Config{}, fmt.Errorf("location.timezone %q: %w", tz, err)
+			}
+			loc.Zone = z
+		}
+		cfg.Location = loc
+	}
+
 	for _, b := range fc.Blinds {
-		cfg.Blinds = append(cfg.Blinds, blissha.BlindConfig{
+		bc := blissha.BlindConfig{
 			Name:        b.Name,
 			MAC:         b.MAC,
 			Password:    b.Password,
 			Invert:      b.Invert,
 			DeviceClass: b.DeviceClass,
 			Adapter:     b.Adapter,
-		})
+		}
+		if b.Automation != nil {
+			auto, err := b.Automation.build()
+			if err != nil {
+				return blissha.Config{}, fmt.Errorf("blinds[%s].automation: %w", b.Name, err)
+			}
+			bc.Automation = auto
+		}
+		cfg.Blinds = append(cfg.Blinds, bc)
 	}
 	return cfg, nil
+}
+
+// intOr / floatOr return the pointed-to value, or def when the pointer is nil
+// (the YAML key was absent). This distinguishes an explicit 0 from an unset key.
+func intOr(p *int, def int) int {
+	if p != nil {
+		return *p
+	}
+	return def
+}
+
+func floatOr(p *float64, def float64) float64 {
+	if p != nil {
+		return *p
+	}
+	return def
+}
+
+// build converts the YAML automation block into a blissha.Automation.
+func (a *automationFile) build() (blissha.Automation, error) {
+	mode, err := blissha.ParseAutomationMode(a.Mode)
+	if err != nil {
+		return blissha.Automation{}, err
+	}
+	whenUnoccupied, err := blissha.ParseAutomationMode(a.WhenUnoccupied)
+	if err != nil {
+		return blissha.Automation{}, fmt.Errorf("when_unoccupied: %w", err)
+	}
+	out := blissha.Automation{
+		Mode:             mode,
+		ShadeClosedHA:    intOr(a.ShadeClosed, 25), // nil = default; explicit 0 = full close
+		RequireOccupancy: a.RequireOccupancy,
+		WhenUnoccupied:   whenUnoccupied,
+		Recompute:        time.Duration(a.Recompute),
+		MinMoveInterval:  time.Duration(a.MinMoveInterval),
+		OverrideTimeout:  time.Duration(a.OverrideTimeout),
+		Deadband:         a.Deadband,
+		Step:             a.Step,
+		MaxMovesPerHour:  a.MaxMovesPerHour,
+		MinAltitudeDeg:   a.MinAltitude,
+	}
+	if w := a.Window; w != nil {
+		out.Window = blissha.Window{
+			AzimuthDeg: w.Azimuth, BottomUp: w.BottomUp, HeightM: w.HeightM, SillM: w.SillM,
+			ProtectedDepthM: w.ProtectedDepthM, ProtectedHeightM: w.ProtectedHeightM, Sensitivity: w.Sensitivity,
+		}
+	}
+	for _, e := range a.Schedule {
+		out.Schedule = append(out.Schedule, blissha.ScheduleEntry{
+			Days: blissha.DaySet(e.Days), CloseAt: blissha.Clock(e.CloseAt), OpenAt: blissha.Clock(e.OpenAt),
+			SleepHA: e.Sleep, OpenHA: e.Open, Ramp: time.Duration(e.Ramp),
+			NotBeforeSunrise: e.NotBeforeSunrise, NotAfterSunset: e.NotAfterSunset,
+		})
+	}
+	if th := a.Thermal; th != nil {
+		out.Thermal = blissha.Thermal{
+			SummerCloseHA: intOr(th.SummerClose, 20), // nil = default; explicit 0 = full close
+			WinterOpenHA:  th.WinterOpen,             // 0 (nonsensical "open") defaulted to 100 by the library
+			HotTempC:      floatOr(th.HotTempC, 24),
+			ColdTempC:     floatOr(th.ColdTempC, 10),
+		}
+	}
+	if p := a.PresenceSim; p != nil {
+		out.PresenceSim = blissha.PresenceSim{Enabled: p.Enabled, MorningOpen: blissha.Clock(p.MorningOpen), EveningClose: blissha.Clock(p.EveningClose), OpenHA: p.Open, CloseHA: p.Close}
+	}
+	if p := a.Privacy; p != nil {
+		out.Privacy = blissha.Privacy{AfterDark: p.AfterDark, CloseHA: p.Close, OccupiedOnly: p.OccupiedOnly}
+	}
+	if l := a.Lux; l != nil {
+		out.Lux = blissha.LuxGate{EngageAbove: l.EngageAbove, DisengageBelow: l.DisengageBelow}
+	}
+	return out, nil
 }
 
 // build turns the YAML tls block into a *tls.Config for the MQTT client.
@@ -147,5 +320,42 @@ func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 		return fmt.Errorf("invalid duration %q: %w", s, err)
 	}
 	*d = Duration(parsed)
+	return nil
+}
+
+// clockYAML is a blissha.Clock that unmarshals from "HH:MM".
+type clockYAML blissha.Clock
+
+// UnmarshalYAML parses a 24-hour "HH:MM" wall-clock time.
+func (c *clockYAML) UnmarshalYAML(value *yaml.Node) error {
+	var s string
+	if err := value.Decode(&s); err != nil {
+		return err
+	}
+	h, m, ok := strings.Cut(strings.TrimSpace(s), ":")
+	hh, err1 := strconv.Atoi(h)
+	mm, err2 := strconv.Atoi(m)
+	if !ok || err1 != nil || err2 != nil || hh < 0 || hh > 23 || mm < 0 || mm > 59 {
+		return fmt.Errorf("invalid time %q, want HH:MM", s)
+	}
+	*c = clockYAML(hh*60 + mm)
+	return nil
+}
+
+// daysYAML is a blissha.DaySet that unmarshals from a list of day tokens like
+// [mon, tue] or [weekdays].
+type daysYAML blissha.DaySet
+
+// UnmarshalYAML parses a list of weekday tokens into a day bitmask.
+func (d *daysYAML) UnmarshalYAML(value *yaml.Node) error {
+	var tokens []string
+	if err := value.Decode(&tokens); err != nil {
+		return err
+	}
+	set, err := blissha.ParseDaySet(tokens)
+	if err != nil {
+		return err
+	}
+	*d = daysYAML(set)
 	return nil
 }

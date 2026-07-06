@@ -159,6 +159,42 @@ would defeat the mode) — it syncs on the next command. `poll_interval: 0`
 requires on-demand mode; in persistent mode it falls back to the 30s cadence,
 since a held connection must be polled to notice a dropped link.
 
+### Sun & schedule automation
+
+Each blind can optionally drive itself. Set a home `location:` (latitude,
+longitude and an explicit IANA `timezone` — embedded, so it works in a bare
+container) and a per-blind `automation:` block. Modes:
+
+| Mode | What it does |
+|------|--------------|
+| `sun_glare` | Proportional cut-off: lowers the shade just enough to keep direct sun off a protected zone (the TV/sofa), and stays as open as possible otherwise. Most useful on **east/west** windows, where low morning/evening sun causes glare; a high midday sun barely penetrates and the shade stays open. |
+| `sun_shade` | Simple: close to a set position while the sun is on the window, open otherwise (with hysteresis). |
+| `schedule` | Clock-based sleep-close + gradual wake-open, **decoupled from the sun** (right for high latitudes). Optional `not_before_sunrise`/`not_after_sunset` clamps keep it sane year-round. |
+| `thermal` | Blocks sun-facing windows in the hot season, opens for passive gain in the cold season. |
+
+The decision engine is **evaluation-cheap, actuation-expensive**: it recomputes
+the target from the local sun position and the *cached* last-known position
+without any Bluetooth, and only connects when a move is actually warranted — so
+automation is fully compatible with command-only battery mode. Moves are
+throttled (deadband, quantize-to-step, min-interval, hourly cap), and a manual
+or RF-remote move pauses automation for `override_timeout` so it never fights
+you.
+
+Preview what a config would do, per hour, without touching Bluetooth or MQTT:
+
+```
+blissha -config config.yaml -dry-run
+```
+
+Occupancy, brightness and outdoor temperature are supplied programmatically via
+the embed API (see below) — e.g. gate glare on room presence:
+
+```go
+bridge.SetRoomOccupancy("AA:BB:CC:DD:EE:01", true) // someone's in the room
+bridge.SetHomeAway(true)                            // nobody home → presence sim
+bridge.SetLux("AA:BB:CC:DD:EE:01", 45000)           // only shade when actually bright
+```
+
 ### Run (podman / docker)
 
 The bridge talks to the host's BlueZ over the system D-Bus socket, so mount that
@@ -204,14 +240,18 @@ standard `*tls.Config` you supply on `MQTTConfig.TLS`.
 cmd/blissctl     interactive CLI
 cmd/blissha      Home Assistant MQTT bridge — YAML/CLI + container entrypoint
 pkg/blissha      embeddable HA↔BLE bridge (struct config, MQTT discovery)
+  controller.go  pure Decide() automation engine (sun/schedule/thermal); table-tested
+  automation.go  automation/location config structs + defaults/validation
+pkg/solar        pure NOAA solar position (altitude/azimuth, sunrise/sunset); no deps
 pkg/bliss        importable BLE library
   protocol.go    pure command builders + response parser (no BLE deps, unit-tested)
   client.go      BLE transport (scan → connect → login → commands) via tinygo bluetooth
 ```
 
-The wire-format logic in `protocol.go` has no Bluetooth dependency, so it is fully
-unit-tested (`go test ./pkg/bliss`) and reusable if you want to port the protocol to
-another transport or language.
+The wire-format logic in `protocol.go`, the solar math in `pkg/solar`, and the
+`Decide()` automation engine have no Bluetooth dependency, so they are fully
+unit-tested and reusable — the sun/glare logic is pure functions you can port or
+drive from your own controller.
 
 ## Protocol notes
 

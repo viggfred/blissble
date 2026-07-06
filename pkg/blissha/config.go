@@ -23,6 +23,9 @@ type Config struct {
 	// after this idle window. 0 keeps a persistent connection.
 	IdleDisconnect time.Duration
 	Blinds         []BlindConfig
+	// Location is the home's geographic position, shared by all sun-based and
+	// schedule automation. Required (non-nil) only if a blind uses such a mode.
+	Location *Location
 }
 
 // MQTTConfig holds broker connection and Home Assistant discovery settings.
@@ -51,6 +54,9 @@ type BlindConfig struct {
 	// default (hci0); otherwise "hciN" or the adapter's own Bluetooth MAC (the
 	// MAC is stable across reboots/replug, unlike hciN numbering).
 	Adapter string
+	// Automation is the optional sun/schedule automation for this blind. The zero
+	// value (ModeOff) disables it.
+	Automation Automation
 }
 
 // defaultPersistentPoll is the status cadence used in persistent mode when no
@@ -85,11 +91,27 @@ func (c *Config) applyDefaults() {
 	if c.Poll == 0 && c.IdleDisconnect == 0 {
 		c.Poll = defaultPersistentPoll
 	}
+	for i := range c.Blinds {
+		c.Blinds[i].Automation.applyDefaults()
+	}
+}
+
+// Normalize applies defaults to unset fields and validates the configuration.
+// New calls it; embedders and tools (e.g. a dry run) can call it to obtain a
+// fully-defaulted, validated Config.
+func (c *Config) Normalize() error {
+	c.applyDefaults()
+	return c.validate()
 }
 
 func (c *Config) validate() error {
 	if strings.TrimSpace(c.MQTT.Broker) == "" {
 		return fmt.Errorf("mqtt.broker is required")
+	}
+	if c.Location != nil {
+		if err := c.Location.validate(); err != nil {
+			return fmt.Errorf("location: %w", err)
+		}
 	}
 	seen := make(map[string]bool)
 	for i, b := range c.Blinds {
@@ -104,6 +126,16 @@ func (c *Config) validate() error {
 			return fmt.Errorf("blinds[%d]: duplicate mac %s", i, b.MAC)
 		}
 		seen[id] = true
+
+		if err := b.Automation.validate(); err != nil {
+			return fmt.Errorf("blinds[%d] (%s): automation: %w", i, b.Name, err)
+		}
+		if b.Automation.needsGeo() && c.Location == nil {
+			return fmt.Errorf("blinds[%d] (%s): automation mode %v needs a top-level location (latitude/longitude)", i, b.Name, b.Automation.Mode)
+		}
+		if b.Automation.needsZone() && (c.Location == nil || c.Location.Zone == nil) {
+			return fmt.Errorf("blinds[%d] (%s): automation mode %v needs location.timezone", i, b.Name, b.Automation.Mode)
+		}
 	}
 	return nil
 }
