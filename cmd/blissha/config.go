@@ -16,8 +16,9 @@ type Config struct {
 	MQTT MQTTConfig `yaml:"mqtt"`
 	// Poll is the status-refresh cadence. In persistent mode it polls over the
 	// held connection; in on-demand mode it is how often to briefly connect just
-	// to refresh position/battery.
-	Poll Duration `yaml:"poll_interval"`
+	// to refresh position/battery. Set it to 0 to disable periodic refresh
+	// entirely (command-only). A nil pointer means "unset" and gets a default.
+	Poll *Duration `yaml:"poll_interval"`
 	// IdleDisconnect, when > 0, enables on-demand mode: the BLE link is kept
 	// disconnected and only opened to run a command or a refresh, then dropped
 	// after this idle window. 0 (default) keeps a persistent connection.
@@ -134,12 +135,14 @@ func (c *Config) applyDefaults() {
 	if c.IdleDisconnect < 0 {
 		c.IdleDisconnect = 0
 	}
-	if c.Poll <= 0 {
+	if c.Poll == nil { // unset -> pick a default cadence for the mode
+		d := Duration(30 * time.Second)
 		if c.IdleDisconnect > 0 {
-			c.Poll = Duration(time.Hour) // on-demand: refresh infrequently
-		} else {
-			c.Poll = Duration(30 * time.Second)
+			d = Duration(time.Hour) // on-demand: refresh infrequently
 		}
+		c.Poll = &d
+	} else if *c.Poll < 0 {
+		*c.Poll = 0 // negative is meaningless; treat as disabled
 	}
 }
 

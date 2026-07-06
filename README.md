@@ -128,13 +128,33 @@ stable across reboots, unlike `hciN` numbering. Blinds on the same adapter
 serialize their scans; different adapters scan in parallel. Omit `adapter:` to
 use the default (`hci0`). BlueZ handles the multiple adapters automatically.
 
-**Battery saving.** By default `blissha` holds a persistent BLE connection. The
-connection itself — not the polling — is what costs battery, so set
-`idle_disconnect` (e.g. `30s`) to switch to **on-demand mode**: the link is kept
-disconnected while idle and only opened to run a command or a refresh, then
-dropped again. Commands then take a few extra seconds (scan + connect), which is
-fine for scenes/automations. In on-demand mode raise `poll_interval` (e.g. `1h`)
-so status refreshes — and their reconnects — stay infrequent.
+### Power saving
+
+The motor is a battery device, so BLE activity matters. Two facts shape the
+options:
+
+- **Holding a BLE connection open — not the polling rate — is the main battery
+  cost.** A connected peripheral must service the link continuously; a status
+  read over an already-open link is almost free.
+- **Position is only readable by connecting.** The motor advertises ~every
+  500&nbsp;ms while idle, but its advertisement carries only static metadata
+  (firmware, limit flags) — *not* position or battery (verified on-device). So
+  there is no way to read state passively, and changes made with the RF remote
+  can't be observed until `blissha` next connects.
+
+Given that, pick a mode with two knobs — `idle_disconnect` and `poll_interval`:
+
+| Mode | Config | Behaviour | Battery |
+|------|--------|-----------|---------|
+| **Persistent** (default) | `idle_disconnect` unset | Holds the link open, polls every `poll_interval` (default 30s) | Highest |
+| **On-demand** | `idle_disconnect: 30s` | Connects only for a command or a refresh, drops the link after the idle window (default `poll_interval` 1h) | Low |
+| **Command-only** | `idle_disconnect: 30s`, `poll_interval: 0` | Connects *only* when HA sends a command; never polls | Lowest |
+
+Command-only (`poll_interval: 0`) is the most frugal: HA stays accurate for
+HA-driven moves and only goes stale after RF-remote/app use — which can't be
+detected cheaply anyway. Commands take a few extra seconds (scan + connect),
+which is fine for scenes and automations. `blissha` still does one status read
+at startup and retries a briefly-unreachable blind on a short backoff.
 
 ### Run (podman / docker)
 

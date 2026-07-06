@@ -15,13 +15,18 @@ mqtt:
   #   key: /config/client.key
   #   insecure: false           # skip verification (not recommended)
 
-# How often to refresh each blind's status.
+# How often to refresh each blind's status by connecting and reading it.
+# (Position is NOT broadcast in advertisements, so status always requires a
+# connection.) Set to 0 to disable periodic refresh entirely — "command-only":
+# blissha then connects only when Home Assistant sends a command. HA stays
+# accurate for HA-driven moves and only lags after RF-remote/app use.
 poll_interval: 30s
 
 # Battery-saving mode: when set (> 0), blissha keeps the BLE link DISCONNECTED
 # while idle and only connects to run a command or a refresh, dropping it again
 # after this idle window. Leave unset (0) for a persistent connection. In
-# on-demand mode, raise poll_interval (e.g. 1h) so refreshes stay infrequent.
+# on-demand mode, raise poll_interval (e.g. 1h), or set it to 0 for the most
+# frugal command-only operation.
 # idle_disconnect: 30s
 
 # Zero or more blinds. Each becomes an HA Cover (+ battery sensor and

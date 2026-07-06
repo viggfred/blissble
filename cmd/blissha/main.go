@@ -100,7 +100,7 @@ func main() {
 			adapters[id] = adapter
 			scanMus[id] = &sync.Mutex{}
 		}
-		managers = append(managers, newManager(cfg.MQTT, bc, client, adapter, scanMus[id], time.Duration(cfg.Poll), time.Duration(cfg.IdleDisconnect), logger))
+		managers = append(managers, newManager(cfg.MQTT, bc, client, adapter, scanMus[id], time.Duration(*cfg.Poll), time.Duration(cfg.IdleDisconnect), logger))
 	}
 
 	logger.Info("connecting to mqtt", "broker", cfg.MQTT.Broker, "blinds", len(managers))
@@ -235,15 +235,19 @@ func (m *manager) runPersistent(ctx context.Context) {
 // pollLoop serves queued commands and polls status until the context is
 // cancelled or a poll fails (link lost, prompting a reconnect in runPersistent).
 func (m *manager) pollLoop(ctx context.Context) {
-	ticker := time.NewTicker(m.poll)
-	defer ticker.Stop()
+	var tick <-chan time.Time // nil (never fires) when polling is disabled
+	if m.poll > 0 {
+		ticker := time.NewTicker(m.poll)
+		defer ticker.Stop()
+		tick = ticker.C
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case op := <-m.actions:
 			m.runOp(ctx, op)
-		case <-ticker.C:
+		case <-tick:
 			if err := m.refreshState(ctx); err != nil {
 				m.log.Warn("status poll failed; will reconnect", "error", err)
 				m.publishAvailability("offline")

@@ -38,11 +38,29 @@ blinds:
 	if c.MQTT.ClientID != "blissble" || c.MQTT.DiscoveryPrefix != "homeassistant" || c.MQTT.BaseTopic != "blissble" {
 		t.Errorf("defaults not applied: %+v", c.MQTT)
 	}
-	if time.Duration(c.Poll) != 45*time.Second {
-		t.Errorf("poll = %v, want 45s", time.Duration(c.Poll))
+	if c.Poll == nil || time.Duration(*c.Poll) != 45*time.Second {
+		t.Errorf("poll = %v, want 45s", c.Poll)
 	}
 	if len(c.Blinds) != 2 || c.Blinds[0].Name != "Living Room" || !c.Blinds[1].Invert {
 		t.Errorf("blinds parsed wrong: %+v", c.Blinds)
+	}
+}
+
+func TestPollIntervalDefaults(t *testing.T) {
+	// Unset -> persistent default (30s).
+	c, _ := LoadConfig(writeConfig(t, "mqtt:\n  broker: b\n"))
+	if c.Poll == nil || time.Duration(*c.Poll) != 30*time.Second {
+		t.Errorf("unset poll = %v, want 30s", c.Poll)
+	}
+	// Unset in on-demand -> hourly default.
+	c, _ = LoadConfig(writeConfig(t, "mqtt:\n  broker: b\nidle_disconnect: 30s\n"))
+	if c.Poll == nil || time.Duration(*c.Poll) != time.Hour {
+		t.Errorf("unset on-demand poll = %v, want 1h", c.Poll)
+	}
+	// Explicit 0 -> disabled (command-only), NOT re-defaulted.
+	c, _ = LoadConfig(writeConfig(t, "mqtt:\n  broker: b\npoll_interval: 0s\n"))
+	if c.Poll == nil || *c.Poll != 0 {
+		t.Errorf("poll_interval 0 = %v, want 0 (disabled)", c.Poll)
 	}
 }
 
