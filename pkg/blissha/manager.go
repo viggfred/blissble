@@ -39,12 +39,19 @@ type blindOp struct {
 	track bool   // poll position until the blind settles, so HA sees it stop
 }
 
+// retainedMsg is a retained MQTT publish (topic + payload).
+type retainedMsg struct {
+	topic   string
+	payload []byte
+}
+
 // manager owns one blind: its BLE connection, MQTT topics and HA discovery.
 type manager struct {
 	cfg            BlindConfig
 	mqtt           MQTTConfig
 	id             string
 	t              topics
+	discovery      []retainedMsg // HA discovery configs, built once (they never change)
 	blind          *bliss.Blind
 	client         mqtt.Client
 	poll           time.Duration
@@ -75,18 +82,33 @@ func newManager(mqttCfg MQTTConfig, bc BlindConfig, client mqtt.Client, adapter 
 		actions:        make(chan blindOp, 8),
 		log:            log,
 	}
+	m.discovery = m.buildDiscovery()
 	blind.OnEvent(m.onBLEEvent)
 	return m
+}
+
+// buildDiscovery marshals the retained HA discovery configs once. They depend
+// only on immutable per-blind config, so they are cached and simply republished
+// on every (re)connect rather than rebuilt each time.
+func (m *manager) buildDiscovery() []retainedMsg {
+	msgs := []retainedMsg{
+		{coverDiscoveryTopic(m.mqtt.DiscoveryPrefix, m.id), coverDiscoveryPayload(m.mqtt, m.cfg, m.t, m.id)},
+		{batteryDiscoveryTopic(m.mqtt.DiscoveryPrefix, m.id), batteryDiscoveryPayload(m.mqtt, m.cfg, m.t, m.id)},
+	}
+	for _, btn := range coverButtons {
+		msgs = append(msgs, retainedMsg{
+			buttonDiscoveryTopic(m.mqtt.DiscoveryPrefix, m.id, btn.Key),
+			buttonDiscoveryPayload(m.mqtt, m.cfg, m.t, m.id, btn.Key, btn.Name),
+		})
+	}
+	return msgs
 }
 
 // onMQTTConnect (re)publishes discovery and (re)subscribes to command topics.
 // It runs on every MQTT (re)connect so entities survive broker restarts.
 func (m *manager) onMQTTConnect(c mqtt.Client) {
-	c.Publish(coverDiscoveryTopic(m.mqtt.DiscoveryPrefix, m.id), 1, true, coverDiscoveryPayload(m.mqtt, m.cfg, m.id))
-	c.Publish(batteryDiscoveryTopic(m.mqtt.DiscoveryPrefix, m.id), 1, true, batteryDiscoveryPayload(m.mqtt, m.cfg, m.id))
-	for _, btn := range coverButtons {
-		c.Publish(buttonDiscoveryTopic(m.mqtt.DiscoveryPrefix, m.id, btn.Key), 1, true,
-			buttonDiscoveryPayload(m.mqtt, m.cfg, m.id, btn.Key, btn.Name))
+	for _, d := range m.discovery {
+		c.Publish(d.topic, 1, true, d.payload)
 	}
 	c.Subscribe(m.t.command, 1, m.handleCommand)
 	c.Subscribe(m.t.setPosition, 1, m.handleSetPosition)
@@ -186,6 +208,12 @@ func (m *manager) runOnDemand(ctx context.Context) {
 	// idle-disconnect timer whenever the link is up.
 	scheduleRefresh := func() {
 		if !m.blind.State().Connected {
+			// Command-only (poll == 0): don't chase an unreachable blind on a
+			// timer — that would defeat the whole point of the mode. Wait for the
+			// next command to trigger a connect instead.
+			if m.poll == 0 {
+				return
+			}
 			refresh.Reset(backoff)
 			backoff = min(backoff*2, onDemandRetryCap)
 			return

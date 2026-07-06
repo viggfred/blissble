@@ -95,8 +95,7 @@ func buttonKeyFromTopic(topic string) string {
 }
 
 // buttonDiscoveryPayload builds an HA MQTT button entity for a discrete action.
-func buttonDiscoveryPayload(mqtt MQTTConfig, b BlindConfig, id, key, name string) []byte {
-	t := blindTopics(mqtt.BaseTopic, id)
+func buttonDiscoveryPayload(mqtt MQTTConfig, b BlindConfig, t topics, id, key, name string) []byte {
 	cfg := map[string]any{
 		"name":                  name,
 		"unique_id":             "blissble_" + id + "_" + key,
@@ -117,8 +116,7 @@ func buttonDiscoveryPayload(mqtt MQTTConfig, b BlindConfig, id, key, name string
 // coverDiscoveryPayload builds the Home Assistant MQTT cover discovery config.
 // The cover is position-based (0=closed, 100=open); HA derives open/closed from
 // the reported position, and open/close/stop go to the command topic.
-func coverDiscoveryPayload(mqtt MQTTConfig, b BlindConfig, id string) []byte {
-	t := blindTopics(mqtt.BaseTopic, id)
+func coverDiscoveryPayload(mqtt MQTTConfig, b BlindConfig, t topics, id string) []byte {
 	cfg := map[string]any{
 		"name":               nil, // use the device name
 		"unique_id":          "blissble_" + id + "_cover",
@@ -155,8 +153,7 @@ func coverDiscoveryPayload(mqtt MQTTConfig, b BlindConfig, id string) []byte {
 
 // batteryDiscoveryPayload builds a diagnostic battery-status sensor grouped
 // under the same HA device.
-func batteryDiscoveryPayload(mqtt MQTTConfig, b BlindConfig, id string) []byte {
-	t := blindTopics(mqtt.BaseTopic, id)
+func batteryDiscoveryPayload(mqtt MQTTConfig, b BlindConfig, t topics, id string) []byte {
 	cfg := map[string]any{
 		"name":                  "Battery",
 		"unique_id":             "blissble_" + id + "_battery",

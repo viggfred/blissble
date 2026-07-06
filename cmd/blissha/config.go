@@ -71,17 +71,16 @@ func LoadConfig(path string) (blissha.Config, error) {
 		IdleDisconnect: time.Duration(fc.IdleDisconnect),
 	}
 
-	// Mode-aware poll default: an unset poll_interval picks a sensible cadence
-	// (30s persistent / 1h on-demand); an explicit 0 means command-only and is
-	// preserved. This "unset vs 0" distinction is why the YAML field is a pointer.
+	// Mode-aware poll default: an unset (or nonsensical negative) poll_interval
+	// picks a sensible cadence (30s persistent / 1h on-demand); an explicit 0
+	// means command-only and is preserved. This "unset vs 0" distinction is why
+	// the YAML field is a pointer.
 	switch {
-	case fc.Poll == nil:
+	case fc.Poll == nil || *fc.Poll < 0:
 		cfg.Poll = 30 * time.Second
 		if cfg.IdleDisconnect > 0 {
 			cfg.Poll = time.Hour
 		}
-	case *fc.Poll < 0:
-		cfg.Poll = 0
 	default:
 		cfg.Poll = time.Duration(*fc.Poll)
 	}

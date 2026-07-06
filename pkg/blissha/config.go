@@ -53,9 +53,15 @@ type BlindConfig struct {
 	Adapter string
 }
 
-// applyDefaults fills unset string fields and clamps negative durations. Note
-// that Poll == 0 is meaningful (command-only) and is left untouched; the
-// "unset -> sensible cadence" default is the config source's job (see the
+// defaultPersistentPoll is the status cadence used in persistent mode when no
+// interval is given. Persistent mode must poll to keep the held link alive and
+// notice silent drops, so command-only (Poll == 0) is not honored there.
+const defaultPersistentPoll = 30 * time.Second
+
+// applyDefaults fills unset string fields and resolves the poll cadence. Poll ==
+// 0 means command-only (connect only for commands), which only makes sense in
+// on-demand mode where the link is dropped while idle; the "unset -> sensible
+// cadence" default for a set-but-empty poll is the config source's job (see the
 // blissha command's YAML loader), since a struct has no "unset" for 0.
 func (c *Config) applyDefaults() {
 	if c.MQTT.ClientID == "" {
@@ -72,6 +78,12 @@ func (c *Config) applyDefaults() {
 	}
 	if c.IdleDisconnect < 0 {
 		c.IdleDisconnect = 0
+	}
+	// In persistent mode a held connection must be polled to detect silent
+	// drops (the BLE client exposes no passive disconnect signal), so a 0 here
+	// would leave a dropped link undetected — fall back to a cadence instead.
+	if c.Poll == 0 && c.IdleDisconnect == 0 {
+		c.Poll = defaultPersistentPoll
 	}
 }
 

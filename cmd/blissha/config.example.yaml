@@ -19,7 +19,9 @@ mqtt:
 # (Position is NOT broadcast in advertisements, so status always requires a
 # connection.) Set to 0 to disable periodic refresh entirely — "command-only":
 # blissha then connects only when Home Assistant sends a command. HA stays
-# accurate for HA-driven moves and only lags after RF-remote/app use.
+# accurate for HA-driven moves and only lags after RF-remote/app use. Note that
+# 0 only takes effect together with idle_disconnect (on-demand); in persistent
+# mode it falls back to the default cadence so a dropped link is still noticed.
 poll_interval: 30s
 
 # Battery-saving mode: when set (> 0), blissha keeps the BLE link DISCONNECTED

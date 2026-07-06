@@ -2,6 +2,7 @@ package blissha
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -12,13 +13,19 @@ func TestApplyDefaults(t *testing.T) {
 	require.Equal(t, "blissble", c.MQTT.ClientID)
 	require.Equal(t, "homeassistant", c.MQTT.DiscoveryPrefix)
 	require.Equal(t, "blissble", c.MQTT.BaseTopic)
-	// Poll == 0 is meaningful (command-only) and must be preserved, not defaulted.
-	require.Zero(t, c.Poll)
+	// Persistent mode (no idle disconnect) must poll for liveness, so Poll == 0
+	// falls back to a default cadence rather than becoming command-only.
+	require.Equal(t, defaultPersistentPoll, c.Poll)
 
-	// Negative durations are clamped to 0.
+	// In on-demand mode, Poll == 0 is honored as command-only.
+	c = Config{MQTT: MQTTConfig{Broker: "b"}, IdleDisconnect: time.Second}
+	c.applyDefaults()
+	require.Zero(t, c.Poll, "command-only preserved in on-demand mode")
+
+	// Negative durations are clamped (then, being persistent, defaulted).
 	c = Config{Poll: -1, IdleDisconnect: -1}
 	c.applyDefaults()
-	require.Zero(t, c.Poll, "negative Poll clamped")
+	require.Equal(t, defaultPersistentPoll, c.Poll, "negative Poll clamped then defaulted")
 	require.Zero(t, c.IdleDisconnect, "negative IdleDisconnect clamped")
 }
 

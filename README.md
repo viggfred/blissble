@@ -153,8 +153,11 @@ Given that, pick a mode with two knobs — `idle_disconnect` and `poll_interval`
 Command-only (`poll_interval: 0`) is the most frugal: HA stays accurate for
 HA-driven moves and only goes stale after RF-remote/app use — which can't be
 detected cheaply anyway. Commands take a few extra seconds (scan + connect),
-which is fine for scenes and automations. `blissha` still does one status read
-at startup and retries a briefly-unreachable blind on a short backoff.
+which is fine for scenes and automations. `blissha` does one status read at
+startup; if the blind is unreachable it does **not** retry on a timer (that
+would defeat the mode) — it syncs on the next command. `poll_interval: 0`
+requires on-demand mode; in persistent mode it falls back to the 30s cadence,
+since a held connection must be polled to notice a dropped link.
 
 ### Run (podman / docker)
 

@@ -38,7 +38,7 @@ func TestCoverDiscoveryPayload(t *testing.T) {
 	id := blindID(b.MAC)
 
 	var m map[string]any
-	require.NoError(t, json.Unmarshal(coverDiscoveryPayload(mqtt, b, id), &m))
+	require.NoError(t, json.Unmarshal(coverDiscoveryPayload(mqtt, b, blindTopics(mqtt.BaseTopic, id), id), &m))
 
 	checks := map[string]any{
 		"command_topic":      "blissble/aabbccddee01/set",
@@ -69,7 +69,7 @@ func TestButtonDiscoveryAndKey(t *testing.T) {
 	id := blindID(b.MAC)
 
 	var m map[string]any
-	require.NoError(t, json.Unmarshal(buttonDiscoveryPayload(mqtt, b, id, "slow_up", "Slow up"), &m))
+	require.NoError(t, json.Unmarshal(buttonDiscoveryPayload(mqtt, b, blindTopics(mqtt.BaseTopic, id), id, "slow_up", "Slow up"), &m))
 	require.Equal(t, "blissble/aabbccddee01/button/slow_up", m["command_topic"])
 	require.Equal(t, "PRESS", m["payload_press"])
 	require.Equal(t, "slow_up", buttonKeyFromTopic("blissble/aabbccddee01/button/slow_up"))

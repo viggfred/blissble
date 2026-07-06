@@ -54,6 +54,11 @@ func TestLoadConfigPollDefaults(t *testing.T) {
 	c, err = LoadConfig(writeConfig(t, "mqtt:\n  broker: b\npoll_interval: 0s\n"))
 	require.NoError(t, err)
 	require.Zero(t, c.Poll, "explicit 0 means command-only")
+
+	// Negative -> treated as unset (mode default), not silently command-only.
+	c, err = LoadConfig(writeConfig(t, "mqtt:\n  broker: b\npoll_interval: -30s\n"))
+	require.NoError(t, err)
+	require.Equal(t, 30*time.Second, c.Poll, "negative poll falls back to the default cadence")
 }
 
 func TestLoadConfigErrors(t *testing.T) {
