@@ -364,7 +364,7 @@ func (m *manager) trackUntilSettled(ctx context.Context) {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 	timeout := time.After(90 * time.Second) // safety cap; movement normally ends sooner
-	last, stable := -1, 0
+	tracker := newSettleTracker()
 	for {
 		select {
 		case <-ctx.Done():
@@ -379,18 +379,13 @@ func (m *manager) trackUntilSettled(ctx context.Context) {
 				m.publishState(m.settledState())
 				return
 			}
-			last, stable = -1, 0 // restart settle detection for the new movement
+			tracker = newSettleTracker() // restart settle detection for the new movement
 		case <-ticker.C:
 			m.ensureConnected(ctx)
 			m.requestStatus() // -> onBLEEvent publishes the fresh position
-			cur := int(m.blind.State().Position)
-			if cur == last {
-				if stable++; stable >= 2 {
-					m.publishState(m.settledState())
-					return
-				}
-			} else {
-				last, stable = cur, 0
+			if tracker.observe(int(m.blind.State().Position)) {
+				m.publishState(m.settledState())
+				return
 			}
 		case <-timeout:
 			m.publishState(m.settledState())
@@ -401,14 +396,7 @@ func (m *manager) trackUntilSettled(ctx context.Context) {
 
 // settledState maps the last known position to a resting cover state.
 func (m *manager) settledState() string {
-	switch ha := toHA(m.blind.State().Position, m.cfg.Invert); {
-	case ha >= 100:
-		return "open"
-	case ha <= 0:
-		return "closed"
-	default:
-		return "stopped"
-	}
+	return restingState(toHA(m.blind.State().Position, m.cfg.Invert))
 }
 
 func (m *manager) publishState(s string) {
