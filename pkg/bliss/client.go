@@ -243,11 +243,17 @@ func applyEvent(s State, ev Event) State {
 	return s
 }
 
+// hexValue lazily hex-encodes bytes for slog, so the formatting only runs when
+// the log record is actually emitted (i.e. at debug level), not on every frame.
+type hexValue []byte
+
+func (h hexValue) LogValue() slog.Value { return slog.StringValue(fmt.Sprintf("%X", []byte(h))) }
+
 // onNotify parses each notification, updates state, and fans out to OnEvent.
 func (b *Blind) onNotify(buf []byte) {
 	ev, ok := ParseResponse(buf)
 	if !ok {
-		b.logger.Debug("unparsed notification", slog.String("hex", fmt.Sprintf("%X", buf)))
+		b.logger.Debug("unparsed notification", slog.Any("hex", hexValue(buf)))
 		return
 	}
 	b.mu.Lock()
@@ -261,7 +267,7 @@ func (b *Blind) onNotify(buf []byte) {
 	cb := b.onEvent
 	b.mu.Unlock()
 
-	b.logger.Debug("response", slog.String("hex", fmt.Sprintf("%X", buf)), slog.String("op", fmt.Sprintf("0x%02X", ev.Opcode)))
+	b.logger.Debug("response", slog.Any("hex", hexValue(buf)), slog.String("op", fmt.Sprintf("0x%02X", ev.Opcode)))
 	if cb != nil {
 		cb(ev)
 	}
@@ -308,7 +314,7 @@ func (b *Blind) writeRaw(frame []byte) error {
 	if _, err := c.Write(frame); err != nil {
 		return err
 	}
-	b.logger.Debug("sent", slog.String("hex", fmt.Sprintf("%X", frame)))
+	b.logger.Debug("sent", slog.Any("hex", hexValue(frame)))
 	return nil
 }
 
