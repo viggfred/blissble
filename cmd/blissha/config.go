@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"os"
 	"strings"
@@ -25,12 +27,51 @@ type Config struct {
 
 // MQTTConfig holds broker connection and Home Assistant discovery settings.
 type MQTTConfig struct {
-	Broker          string `yaml:"broker"` // e.g. tcp://192.168.1.10:1883
+	Broker          string `yaml:"broker"` // e.g. tcp://192.168.1.10:1883 or tls://host:8883
 	Username        string `yaml:"username"`
 	Password        string `yaml:"password"`
 	ClientID        string `yaml:"client_id"`        // default "blissble"
 	DiscoveryPrefix string `yaml:"discovery_prefix"` // default "homeassistant"
 	BaseTopic       string `yaml:"base_topic"`       // default "blissble"
+	// TLS configures a tls:// (or ssl://) broker connection. Omit for a plain
+	// tcp:// broker, or for a tls:// broker whose certificate is already trusted
+	// by the system CA pool (then no options are needed).
+	TLS *TLSConfig `yaml:"tls"`
+}
+
+// TLSConfig configures the MQTT TLS connection.
+type TLSConfig struct {
+	CACert   string `yaml:"ca_cert"`  // PEM CA to trust (e.g. a self-signed broker CA)
+	Cert     string `yaml:"cert"`     // client certificate (for mutual TLS)
+	Key      string `yaml:"key"`      // client private key
+	Insecure bool   `yaml:"insecure"` // skip server certificate verification (not recommended)
+}
+
+// build turns the TLS config into a *tls.Config for the MQTT client.
+func (t *TLSConfig) build() (*tls.Config, error) {
+	cfg := &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: t.Insecure} //nolint:gosec // opt-in via config
+	if t.CACert != "" {
+		pem, err := os.ReadFile(t.CACert)
+		if err != nil {
+			return nil, fmt.Errorf("read tls.ca_cert: %w", err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("tls.ca_cert %q: no valid certificates", t.CACert)
+		}
+		cfg.RootCAs = pool
+	}
+	if t.Cert != "" || t.Key != "" {
+		if t.Cert == "" || t.Key == "" {
+			return nil, fmt.Errorf("tls: both cert and key are required for mutual TLS")
+		}
+		crt, err := tls.LoadX509KeyPair(t.Cert, t.Key)
+		if err != nil {
+			return nil, fmt.Errorf("load tls client cert/key: %w", err)
+		}
+		cfg.Certificates = []tls.Certificate{crt}
+	}
+	return cfg, nil
 }
 
 // BlindConfig describes a single motor to expose to Home Assistant.

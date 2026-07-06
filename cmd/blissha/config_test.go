@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"os"
 	"path/filepath"
 	"testing"
@@ -66,6 +67,22 @@ blinds:
 	// Zero blinds is allowed.
 	if _, err := LoadConfig(writeConfig(t, "mqtt:\n  broker: tcp://b:1883\n")); err != nil {
 		t.Errorf("zero blinds should be valid: %v", err)
+	}
+}
+
+func TestTLSConfigBuild(t *testing.T) {
+	tc, err := (&TLSConfig{Insecure: true}).build()
+	if err != nil {
+		t.Fatalf("insecure build: %v", err)
+	}
+	if !tc.InsecureSkipVerify || tc.MinVersion != tls.VersionTLS12 {
+		t.Errorf("insecure=%v minVersion=%#x", tc.InsecureSkipVerify, tc.MinVersion)
+	}
+	if _, err := (&TLSConfig{CACert: "/no/such/ca.pem"}).build(); err == nil {
+		t.Error("expected error for missing ca_cert")
+	}
+	if _, err := (&TLSConfig{Cert: "/x.pem"}).build(); err == nil {
+		t.Error("expected error for cert without key")
 	}
 }
 

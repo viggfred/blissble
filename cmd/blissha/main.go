@@ -59,6 +59,14 @@ func main() {
 	if cfg.MQTT.Username != "" {
 		opts.SetUsername(cfg.MQTT.Username).SetPassword(cfg.MQTT.Password)
 	}
+	if cfg.MQTT.TLS != nil {
+		tlsCfg, err := cfg.MQTT.TLS.build()
+		if err != nil {
+			logger.Error("invalid mqtt.tls config", "error", err)
+			os.Exit(1)
+		}
+		opts.SetTLSConfig(tlsCfg)
+	}
 
 	// managers is captured by the OnConnect handler below; it is fully populated
 	// before Connect() is called, so the handler always sees every blind.

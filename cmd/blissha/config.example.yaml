@@ -7,6 +7,13 @@ mqtt:
   # client_id: blissble
   # discovery_prefix: homeassistant  # must match HA's MQTT discovery prefix
   # base_topic: blissble             # prefix for state/command topics
+  # For a tls:// broker: nothing extra is needed if its cert is trusted by the
+  # system CA pool. Otherwise configure TLS here:
+  # tls:
+  #   ca_cert: /config/ca.pem   # trust a self-signed broker CA
+  #   cert: /config/client.pem  # client cert for mutual TLS (with key)
+  #   key: /config/client.key
+  #   insecure: false           # skip verification (not recommended)
 
 # How often to refresh each blind's status.
 poll_interval: 30s
