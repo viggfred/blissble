@@ -30,14 +30,52 @@ import (
 	"github.com/viggfred/blissble/pkg/bliss"
 )
 
-// blindOp is a BLE action queued by an MQTT handler and executed on the
-// manager's goroutine (so connect/idle handling stays in one place).
+// opOrigin distinguishes a human/HA-initiated move from an automation move, so a
+// manual move can pause automation (override) while automation's own moves don't.
+type opOrigin int
+
+const (
+	opManual opOrigin = iota // default: human/HA command
+	opAuto                   // issued by the sun/schedule controller
+)
+
+// blindOp is a BLE action queued by an MQTT handler or the controller and
+// executed on the manager's goroutine (so connect/idle handling stays in one
+// place).
 type blindOp struct {
-	desc  string
-	fn    func() error
-	state string // HA cover state to announce before running (e.g. "opening"); "" = none
-	track bool   // poll position until the blind settles, so HA sees it stop
+	desc   string
+	fn     func() error
+	state  string // HA cover state to announce before running (e.g. "opening"); "" = none
+	track  bool   // poll position until the blind settles, so HA sees it stop
+	origin opOrigin
 }
+
+// ctrlKind identifies a controller signal update.
+type ctrlKind int
+
+const (
+	ctrlRoomOcc ctrlKind = iota
+	ctrlHomeAway
+	ctrlLux
+	ctrlTemp
+)
+
+// controlMsg carries an external signal (occupancy, lux, temperature) from
+// another goroutine onto the manager goroutine. Unlike a blindOp it never
+// triggers a BLE connect — it only updates state and re-evaluates automation.
+type controlMsg struct {
+	kind ctrlKind
+	b    bool
+	f    float64
+}
+
+// evalFloor is the minimum interval between automation evaluations. Evaluation
+// is cheap (local math + cached position, no BLE), so a short floor is fine.
+const evalFloor = 30 * time.Second
+
+// externalMoveTolerance is how far (HA %) an at-rest position may drift from the
+// last automation target before we treat it as a human/RF-remote move.
+const externalMoveTolerance = 5
 
 // retainedMsg is a retained MQTT publish (topic + payload).
 type retainedMsg struct {
@@ -58,9 +96,24 @@ type manager struct {
 	idleDisconnect time.Duration // 0 = persistent connection; >0 = on-demand
 	actions        chan blindOp
 	log            *slog.Logger
+
+	// Automation (zero value ModeOff = disabled). All of these fields are owned
+	// exclusively by the manager goroutine; external signals arrive via control.
+	auto     Automation
+	loc      Location
+	control  chan controlMsg
+	sig      Signals
+	ctrl     ControllerState
+	nextEval time.Duration // last Decision.NextEvalIn hint
+	// lastPosHA is the manager's own cache of the last observed HA position. It
+	// is used by the controller (rather than bliss.State(), which Disconnect
+	// zeroes) so a stale/idle link doesn't look like a closed blind, and it
+	// survives idle disconnects in on-demand mode.
+	lastPosHA int
+	posKnown  bool // true once a status has been observed
 }
 
-func newManager(mqttCfg MQTTConfig, bc BlindConfig, client mqtt.Client, adapter *bluetooth.Adapter, scanMu *sync.Mutex, poll, idleDisconnect time.Duration, logger *slog.Logger) *manager {
+func newManager(mqttCfg MQTTConfig, bc BlindConfig, loc *Location, client mqtt.Client, adapter *bluetooth.Adapter, scanMu *sync.Mutex, poll, idleDisconnect time.Duration, logger *slog.Logger) *manager {
 	id := blindID(bc.MAC)
 	log := logger.With("blind", bc.Name, "mac", bc.MAC)
 	blind := bliss.New(bliss.Config{
@@ -70,6 +123,10 @@ func newManager(mqttCfg MQTTConfig, bc BlindConfig, client mqtt.Client, adapter 
 		Logger:     log,
 		ScanMutex:  scanMu,
 	})
+	var location Location
+	if loc != nil {
+		location = *loc
+	}
 	m := &manager{
 		cfg:            bc,
 		mqtt:           mqttCfg,
@@ -81,10 +138,25 @@ func newManager(mqttCfg MQTTConfig, bc BlindConfig, client mqtt.Client, adapter 
 		idleDisconnect: idleDisconnect,
 		actions:        make(chan blindOp, 8),
 		log:            log,
+		auto:           bc.Automation,
+		loc:            location,
+		control:        make(chan controlMsg, 8),
 	}
 	m.discovery = m.buildDiscovery()
 	blind.OnEvent(m.onBLEEvent)
 	return m
+}
+
+// automating reports whether this blind has automation enabled.
+func (m *manager) automating() bool { return m.auto.Mode != ModeOff }
+
+// sendControl hands an external signal to the manager goroutine (non-blocking).
+func (m *manager) sendControl(msg controlMsg) {
+	select {
+	case m.control <- msg:
+	default:
+		m.log.Warn("control queue full; dropping signal")
+	}
 }
 
 // buildDiscovery marshals the retained HA discovery configs once. They depend
@@ -150,7 +222,7 @@ func (m *manager) runPersistent(ctx context.Context) {
 		backoff = time.Second
 		m.log.Info("blind connected")
 		m.publishAvailability("online")
-		_ = m.refreshState(ctx)
+		_ = m.refreshState(ctx, true)
 		m.pollLoop(ctx)
 	}
 }
@@ -164,14 +236,25 @@ func (m *manager) pollLoop(ctx context.Context) {
 		defer ticker.Stop()
 		tick = ticker.C
 	}
+	evalTimer := m.newEvalTimer()
+	var evalC <-chan time.Time
+	if evalTimer != nil {
+		defer evalTimer.Stop()
+		evalC = evalTimer.C
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case op := <-m.actions:
 			m.runOp(ctx, op)
+		case msg := <-m.control:
+			m.applyControl(msg)
+		case <-evalC:
+			m.evaluate()
+			evalTimer.Reset(m.evalDelay())
 		case <-tick:
-			if err := m.refreshState(ctx); err != nil {
+			if err := m.refreshState(ctx, true); err != nil {
 				m.log.Warn("status poll failed; will reconnect", "error", err)
 				m.publishAvailability("offline")
 				m.blind.Disconnect()
@@ -179,6 +262,28 @@ func (m *manager) pollLoop(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// newEvalTimer starts the automation evaluation timer, or returns nil when
+// automation is disabled.
+func (m *manager) newEvalTimer() *time.Timer {
+	if !m.automating() {
+		return nil
+	}
+	return time.NewTimer(m.evalDelay())
+}
+
+// evalDelay is how long until the next automation evaluation, honoring the last
+// Decision hint but never faster than evalFloor.
+func (m *manager) evalDelay() time.Duration {
+	d := m.nextEval
+	if d <= 0 {
+		d = m.auto.Recompute
+	}
+	if d <= 0 {
+		d = 5 * time.Minute
+	}
+	return max(d, evalFloor)
 }
 
 // onDemandRetryStart/Cap bound the reconnect backoff used while a blind is
@@ -225,6 +330,16 @@ func (m *manager) runOnDemand(ctx context.Context) {
 		}
 	}
 
+	// The automation timer is independent of the connection/refresh logic:
+	// evaluation is BLE-free, so it fires even while disconnected (command-only),
+	// and only submits a move — which wakes the link via the actions path.
+	evalTimer := m.newEvalTimer()
+	var evalC <-chan time.Time
+	if evalTimer != nil {
+		defer evalTimer.Stop()
+		evalC = evalTimer.C
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -232,8 +347,13 @@ func (m *manager) runOnDemand(ctx context.Context) {
 		case op := <-m.actions:
 			m.runOp(ctx, op)
 			scheduleRefresh()
+		case msg := <-m.control:
+			m.applyControl(msg)
+		case <-evalC:
+			m.evaluate()
+			evalTimer.Reset(m.evalDelay())
 		case <-refresh.C:
-			_ = m.refreshState(ctx)
+			_ = m.refreshState(ctx, true)
 			scheduleRefresh()
 		case <-idle.C:
 			m.log.Debug("idle; disconnecting to save battery")
@@ -263,8 +383,10 @@ func (m *manager) requestStatus() {
 }
 
 // refreshState reads status and publishes the resting cover state, so HA always
-// has a defined state (open/closed) rather than "unknown".
-func (m *manager) refreshState(ctx context.Context) error {
+// has a defined state (open/closed) rather than "unknown". poll marks a routine
+// status poll (as opposed to the settle after one of our own moves), which is
+// the only context in which an unexpected position change means an external move.
+func (m *manager) refreshState(ctx context.Context, poll bool) error {
 	m.ensureConnected(ctx)
 	if err := m.blind.RequestStatus(); err != nil {
 		return err
@@ -273,7 +395,7 @@ func (m *manager) refreshState(ctx context.Context) error {
 	case <-ctx.Done():
 	case <-time.After(500 * time.Millisecond): // let the reply arrive
 	}
-	m.publishState(m.settledState())
+	m.publishSettled(poll)
 	return nil
 }
 
@@ -290,6 +412,7 @@ func (m *manager) submit(op blindOp) {
 // runOp executes a queued action: announce its cover state, run it, then either
 // track the blind until it settles (movement) or just refresh status.
 func (m *manager) runOp(ctx context.Context, op blindOp) {
+	m.noteOrigin(op)
 	m.ensureConnected(ctx) // no-op if already connected (persistent mode)
 	m.publishState(op.state)
 	if err := op.fn(); err != nil {
@@ -298,7 +421,7 @@ func (m *manager) runOp(ctx context.Context, op blindOp) {
 	if op.track {
 		m.trackUntilSettled(ctx)
 	} else {
-		_ = m.refreshState(ctx)
+		_ = m.refreshState(ctx, false) // our own move; not a poll
 	}
 }
 
@@ -321,13 +444,14 @@ func (m *manager) trackUntilSettled(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case op := <-m.actions:
+			m.noteOrigin(op)
 			m.ensureConnected(ctx)
 			m.publishState(op.state)
 			if err := op.fn(); err != nil {
 				m.log.Warn("command failed", "action", op.desc, "error", err)
 			}
 			if !op.track { // e.g. stop: settle immediately
-				m.publishState(m.settledState())
+				m.publishSettled(false)
 				return
 			}
 			tracker = newSettleTracker() // restart settle detection for the new movement
@@ -335,19 +459,117 @@ func (m *manager) trackUntilSettled(ctx context.Context) {
 			m.ensureConnected(ctx)
 			m.requestStatus() // -> onBLEEvent publishes the fresh position
 			if tracker.observe(int(m.blind.State().Position)) {
-				m.publishState(m.settledState())
+				m.publishSettled(false)
 				return
 			}
 		case <-timeout:
-			m.publishState(m.settledState())
+			m.publishSettled(false)
 			return
 		}
 	}
 }
 
-// settledState maps the last known position to a resting cover state.
-func (m *manager) settledState() string {
-	return restingState(toHA(m.blind.State().Position, m.cfg.Invert))
+// publishSettled publishes the resting cover state from the current position and
+// records that observation for the controller. poll=true means it came from a
+// routine status poll (see observe).
+func (m *manager) publishSettled(poll bool) {
+	haPos := toHA(m.blind.State().Position, m.cfg.Invert)
+	m.publishState(restingState(haPos))
+	m.observe(haPos, poll)
+}
+
+// observe records an at-rest position for the controller. On a routine poll, if
+// the position has changed since we last saw it by more than the tolerance and
+// automation didn't command that change (our own moves update lastPosHA at their
+// settle, so they never look like a change here), a human or the RF remote moved
+// it — so automation backs off for OverrideTimeout rather than fighting them.
+// Comparing successive observations (not the commanded target) means a failed or
+// slightly-off automation move is not misread as an external move, and a genuine
+// external move arms the override exactly once rather than re-arming every poll.
+func (m *manager) observe(haPos int, poll bool) {
+	prev, had := m.lastPosHA, m.posKnown
+	m.lastPosHA = haPos
+	m.posKnown = true
+	if !poll || !had || !m.automating() {
+		return
+	}
+	if time.Now().Before(m.ctrl.OverrideUntil) {
+		return // already paused; nothing new to react to
+	}
+	if absInt(haPos-prev) > externalMoveTolerance {
+		m.ctrl.OverrideUntil = time.Now().Add(m.auto.OverrideTimeout)
+		m.log.Debug("external move detected; pausing automation", "observed", haPos, "previous", prev)
+	}
+}
+
+// noteOrigin pauses automation (override) when a human/HA command runs, so
+// automation resumes only after the override window. Automation's own moves
+// (opAuto) never trigger this.
+func (m *manager) noteOrigin(op blindOp) {
+	if op.origin == opManual && m.automating() {
+		m.ctrl.OverrideUntil = time.Now().Add(m.auto.OverrideTimeout)
+	}
+}
+
+// applyControl folds an external signal into the manager's state and
+// re-evaluates automation.
+func (m *manager) applyControl(msg controlMsg) {
+	switch msg.kind {
+	case ctrlRoomOcc:
+		m.sig.RoomOccupied = triFromBool(msg.b)
+	case ctrlHomeAway:
+		m.sig.HomeAway = triFromBool(msg.b)
+	case ctrlLux:
+		m.sig.Lux, m.sig.LuxKnown = msg.f, true
+	case ctrlTemp:
+		m.sig.OutdoorTempC, m.sig.TempKnown = msg.f, true
+	}
+	m.evaluate()
+}
+
+// evaluate runs the pure decision engine against cached state (no BLE) and, if a
+// move is warranted, queues it as an automation-tagged op.
+func (m *manager) evaluate() {
+	if !m.automating() {
+		return
+	}
+	// Use the manager's cached position, not bliss.State(): the cache survives an
+	// idle disconnect (which zeroes the client's state), so a disconnected blind
+	// doesn't read as fully closed and trigger a redundant reconnect+move.
+	dec := Decide(DecisionInput{
+		Cfg:     m.auto,
+		Loc:     m.loc,
+		Now:     time.Now(),
+		Current: Position{HA: m.lastPosHA, Known: m.posKnown},
+		Signals: m.sig,
+		State:   m.ctrl,
+	})
+	m.ctrl = dec.State
+	m.nextEval = dec.NextEvalIn
+	if !dec.Move {
+		m.log.Debug("automation hold", "reason", dec.Reason, "next", m.nextEval)
+		return
+	}
+	m.log.Debug("automation move", "target", dec.TargetHA, "reason", dec.Reason)
+	target := dec.TargetHA
+	state := "opening"
+	if target < m.lastPosHA {
+		state = "closing"
+	}
+	m.submit(blindOp{
+		desc:   "auto:" + dec.Reason,
+		fn:     func() error { return m.blind.SetPosition(toDevice(target, m.cfg.Invert)) },
+		state:  state,
+		track:  true,
+		origin: opAuto,
+	})
+}
+
+func triFromBool(b bool) Tristate {
+	if b {
+		return TriYes
+	}
+	return TriNo
 }
 
 func (m *manager) publishState(s string) {

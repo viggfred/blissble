@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/viggfred/blissble/pkg/blissha"
 )
 
 func writeConfig(t *testing.T, body string) string {
@@ -90,4 +92,97 @@ func TestLoadConfigTLS(t *testing.T) {
 	// A client cert without a key is a load error.
 	_, err = LoadConfig(writeConfig(t, "mqtt:\n  broker: b\n  tls:\n    cert: /x.pem\n"))
 	require.Error(t, err, "cert without key")
+}
+
+func TestLoadConfigAutomation(t *testing.T) {
+	c, err := LoadConfig(writeConfig(t, `
+mqtt: { broker: tcp://b:1883 }
+location: { latitude: 59.91, longitude: 10.75, timezone: Europe/Oslo }
+blinds:
+  - name: LR
+    mac: AA:BB:CC:DD:EE:01
+    automation:
+      mode: sun_glare
+      window: { azimuth: 270, sensitivity: 0.6 }
+      require_occupancy: true
+      when_unoccupied: thermal
+  - name: BR
+    mac: AA:BB:CC:DD:EE:02
+    automation:
+      mode: schedule
+      schedule:
+        - days: [mon, tue]
+          close_at: "22:30"
+          open_at: "07:00"
+          ramp: 20m
+`))
+	require.NoError(t, err)
+	require.NotNil(t, c.Location)
+	require.InDelta(t, 59.91, c.Location.Lat, 1e-9)
+	require.NotNil(t, c.Location.Zone)
+	require.Equal(t, "Europe/Oslo", c.Location.Zone.String())
+
+	lr := c.Blinds[0].Automation
+	require.Equal(t, blissha.ModeSunGlare, lr.Mode)
+	require.InDelta(t, 270, lr.Window.AzimuthDeg, 1e-9)
+	require.True(t, lr.RequireOccupancy)
+	require.Equal(t, blissha.ModeThermal, lr.WhenUnoccupied)
+
+	br := c.Blinds[1].Automation
+	require.Equal(t, blissha.ModeSchedule, br.Mode)
+	require.Len(t, br.Schedule, 1)
+	require.Equal(t, blissha.Mon|blissha.Tue, br.Schedule[0].Days)
+	require.Equal(t, blissha.Clock(22*60+30), br.Schedule[0].CloseAt)
+	require.Equal(t, blissha.Clock(7*60), br.Schedule[0].OpenAt)
+	require.Equal(t, 20*time.Minute, br.Schedule[0].Ramp)
+
+	require.NoError(t, c.Normalize(), "defaults + validation should pass")
+}
+
+func TestLoadConfigAutomationErrors(t *testing.T) {
+	// Unknown IANA timezone.
+	_, err := LoadConfig(writeConfig(t, "mqtt: {broker: b}\nlocation: {latitude: 1, longitude: 2, timezone: Nowhere/Nope}\n"))
+	require.Error(t, err, "bad timezone")
+
+	// Unknown mode.
+	_, err = LoadConfig(writeConfig(t, "mqtt: {broker: b}\nblinds:\n  - {name: X, mac: AA:BB:CC:DD:EE:01, automation: {mode: nonsense}}\n"))
+	require.Error(t, err, "bad mode")
+
+	// Out-of-range clock.
+	_, err = LoadConfig(writeConfig(t, "mqtt: {broker: b}\nblinds:\n  - name: X\n    mac: AA:BB:CC:DD:EE:01\n    automation: {mode: schedule, schedule: [{open_at: \"25:00\", close_at: \"22:00\"}]}\n"))
+	require.Error(t, err, "bad clock")
+
+	// Unknown day token.
+	_, err = LoadConfig(writeConfig(t, "mqtt: {broker: b}\nblinds:\n  - name: X\n    mac: AA:BB:CC:DD:EE:01\n    automation: {mode: schedule, schedule: [{days: [funday], open_at: \"07:00\", close_at: \"22:00\"}]}\n"))
+	require.Error(t, err, "bad day")
+}
+
+func TestLoadConfigSunModeNeedsLocation(t *testing.T) {
+	// Loads fine, but Normalize (validation) rejects a sun mode with no location.
+	c, err := LoadConfig(writeConfig(t, "mqtt: {broker: b}\nblinds:\n  - {name: X, mac: AA:BB:CC:DD:EE:01, automation: {mode: sun_glare, window: {azimuth: 180}}}\n"))
+	require.NoError(t, err)
+	require.Error(t, c.Normalize(), "sun mode requires a location")
+}
+
+func TestLoadConfigZeroValuesHonored(t *testing.T) {
+	base := "mqtt: {broker: b}\nlocation: {latitude: 1, longitude: 2}\n"
+
+	// shade_closed: 0 must stay 0 (full close), not silently become 25.
+	c, err := LoadConfig(writeConfig(t, base+"blinds:\n  - name: X\n    mac: AA:BB:CC:DD:EE:01\n    automation: {mode: sun_shade, window: {azimuth: 180}, shade_closed: 0}\n"))
+	require.NoError(t, err)
+	require.Equal(t, 0, c.Blinds[0].Automation.ShadeClosedHA)
+	require.NoError(t, c.Normalize())
+	require.Equal(t, 0, c.Blinds[0].Automation.ShadeClosedHA, "Normalize must not re-default an explicit 0")
+
+	// Absent shade_closed → default 25.
+	c, err = LoadConfig(writeConfig(t, base+"blinds:\n  - name: X\n    mac: AA:BB:CC:DD:EE:01\n    automation: {mode: sun_shade, window: {azimuth: 180}}\n"))
+	require.NoError(t, err)
+	require.Equal(t, 25, c.Blinds[0].Automation.ShadeClosedHA)
+
+	// thermal: summer_close:0 (full close) and cold_temp_c:0 (freezing) are honored.
+	c, err = LoadConfig(writeConfig(t, base+"blinds:\n  - name: X\n    mac: AA:BB:CC:DD:EE:01\n    automation: {mode: thermal, window: {azimuth: 180}, thermal: {summer_close: 0, cold_temp_c: 0}}\n"))
+	require.NoError(t, err)
+	require.Equal(t, 0, c.Blinds[0].Automation.Thermal.SummerCloseHA)
+	require.Zero(t, c.Blinds[0].Automation.Thermal.ColdTempC)
+	require.EqualValues(t, 24, c.Blinds[0].Automation.Thermal.HotTempC, "absent hot_temp_c → default 24")
 }

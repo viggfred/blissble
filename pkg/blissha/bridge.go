@@ -2,6 +2,7 @@ package blissha
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -17,6 +18,7 @@ type Bridge struct {
 	logger      *slog.Logger
 	client      mqtt.Client
 	managers    []*manager
+	byID        map[string]*manager // blindID -> manager, for signal routing
 	bridgeAvail string
 }
 
@@ -27,14 +29,14 @@ func New(cfg Config, logger *slog.Logger) (*Bridge, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	cfg.applyDefaults()
-	if err := cfg.validate(); err != nil {
+	if err := cfg.Normalize(); err != nil {
 		return nil, err
 	}
 
 	b := &Bridge{
 		cfg:         cfg,
 		logger:      logger,
+		byID:        map[string]*manager{},
 		bridgeAvail: bridgeAvailabilityTopic(cfg.MQTT.BaseTopic),
 	}
 
@@ -74,7 +76,9 @@ func New(cfg Config, logger *slog.Logger) (*Bridge, error) {
 			adapters[id] = adapter
 			scanMus[id] = &sync.Mutex{}
 		}
-		b.managers = append(b.managers, newManager(cfg.MQTT, bc, b.client, adapter, scanMus[id], cfg.Poll, cfg.IdleDisconnect, logger))
+		mgr := newManager(cfg.MQTT, bc, cfg.Location, b.client, adapter, scanMus[id], cfg.Poll, cfg.IdleDisconnect, logger)
+		b.managers = append(b.managers, mgr)
+		b.byID[mgr.id] = mgr
 	}
 	return b, nil
 }
@@ -118,4 +122,45 @@ func (b *Bridge) Run(ctx context.Context) error {
 	wg.Wait()
 	b.client.Disconnect(500)
 	return nil
+}
+
+// SetRoomOccupancy reports whether the room containing a blind is occupied. The
+// blind is named by MAC or blind id (separators/case are normalized). Occupancy
+// gates occupancy-dependent automation (e.g. sun_glare with require_occupancy).
+// Returns an error for an unknown blind. Safe to call from any goroutine.
+func (b *Bridge) SetRoomOccupancy(blind string, occupied bool) error {
+	return b.signal(blind, controlMsg{kind: ctrlRoomOcc, b: occupied})
+}
+
+// SetLux reports the ambient brightness (lux) at a blind, so lux-gated shading
+// only engages when it is actually bright out.
+func (b *Bridge) SetLux(blind string, lux float64) error {
+	return b.signal(blind, controlMsg{kind: ctrlLux, f: lux})
+}
+
+// SetHomeAway sets the home-wide away state on every blind. away=true (nobody
+// home) drives presence simulation where enabled.
+func (b *Bridge) SetHomeAway(away bool) {
+	b.broadcast(controlMsg{kind: ctrlHomeAway, b: away})
+}
+
+// SetOutdoorTemp sets the outdoor temperature (°C) on every blind, used by
+// thermal mode when the season is temperature-driven.
+func (b *Bridge) SetOutdoorTemp(tempC float64) {
+	b.broadcast(controlMsg{kind: ctrlTemp, f: tempC})
+}
+
+func (b *Bridge) signal(blind string, msg controlMsg) error {
+	m, ok := b.byID[blindID(blind)]
+	if !ok {
+		return fmt.Errorf("unknown blind %q", blind)
+	}
+	m.sendControl(msg)
+	return nil
+}
+
+func (b *Bridge) broadcast(msg controlMsg) {
+	for _, m := range b.managers {
+		m.sendControl(msg)
+	}
 }
