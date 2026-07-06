@@ -6,10 +6,23 @@ import (
 	"testing"
 	"time"
 
+	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"github.com/stretchr/testify/require"
 
 	"github.com/viggfred/blissble/pkg/bliss"
 )
+
+// recordingClient is a minimal mqtt.Client that records published payloads. Only
+// Publish is implemented; other interface methods are unused in these tests.
+type recordingClient struct {
+	mqtt.Client
+	published []string
+}
+
+func (c *recordingClient) Publish(_ string, _ byte, _ bool, payload any) mqtt.Token {
+	c.published = append(c.published, payload.(string))
+	return nil
+}
 
 // testManager builds a manager wired for pure-logic tests: a real (unconnected)
 // bliss.Blind whose State() is a safe cached zero value, and buffered channels.
@@ -131,4 +144,17 @@ func TestSendControlNonBlocking(t *testing.T) {
 		m.sendControl(controlMsg{kind: ctrlRoomOcc, b: true})
 	}
 	require.Len(t, m.control, cap(m.control), "excess signals are dropped, not blocked")
+}
+
+func TestPublishAvailabilityDedupsAndRecovers(t *testing.T) {
+	m := testManager(alwaysAwake(), Location{Zone: time.UTC})
+	rc := &recordingClient{}
+	m.client = rc
+
+	m.publishAvailability("online")  // "" -> online: publish
+	m.publishAvailability("online")  // unchanged: skipped
+	m.publishAvailability("offline") // e.g. a failed connect
+	m.publishAvailability("online")  // recovery must republish, not be swallowed
+
+	require.Equal(t, []string{"online", "offline", "online"}, rc.published)
 }
