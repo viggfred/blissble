@@ -173,12 +173,35 @@ podman run -d --name blissha \
 Docker/Podman Compose. If BLE scanning misbehaves in a restricted network
 namespace, add `--net=host`.
 
+### Embedding the bridge
+
+`cmd/blissha` is a thin YAML/CLI wrapper around `pkg/blissha`, which is a
+reusable library. To run the bridge from your own binary, configure it with
+plain structs (no YAML) and call `Run`:
+
+```go
+bridge, err := blissha.New(blissha.Config{
+	MQTT:   blissha.MQTTConfig{Broker: "tcp://localhost:1883"},
+	Poll:   0, // command-only; or e.g. 30*time.Second to poll
+	Blinds: []blissha.BlindConfig{{Name: "Living Room", MAC: "AA:BB:CC:DD:EE:01"}},
+}, logger)
+if err != nil {
+	log.Fatal(err)
+}
+log.Fatal(bridge.Run(ctx)) // blocks until ctx is cancelled
+```
+
+`New` builds the MQTT client and one manager per blind; `Run` connects, serves
+until the context is cancelled, then shuts everything down cleanly. TLS is a
+standard `*tls.Config` you supply on `MQTTConfig.TLS`.
+
 ## Layout
 
 ```
 cmd/blissctl     interactive CLI
-cmd/blissha      Home Assistant MQTT bridge (container)
-pkg/bliss        importable library
+cmd/blissha      Home Assistant MQTT bridge — YAML/CLI + container entrypoint
+pkg/blissha      embeddable HA↔BLE bridge (struct config, MQTT discovery)
+pkg/bliss        importable BLE library
   protocol.go    pure command builders + response parser (no BLE deps, unit-tested)
   client.go      BLE transport (scan → connect → login → commands) via tinygo bluetooth
 ```

@@ -1,34 +1,27 @@
 package bliss
 
 import (
-	"bytes"
 	"encoding/hex"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func mustHex(t *testing.T, s string) []byte {
 	t.Helper()
 	b, err := hex.DecodeString(s)
-	if err != nil {
-		t.Fatalf("bad hex %q: %v", s, err)
-	}
+	require.NoError(t, err, "bad hex %q", s)
 	return b
 }
 
 func TestLoginCommand(t *testing.T) {
 	// Validated live against a real HD1300.
-	if got := LoginCommand("xxxxxx"); !bytes.Equal(got, mustHex(t, "ff03030303787878787878")) {
-		t.Fatalf("login(xxxxxx) = %x", got)
-	}
+	require.Equal(t, mustHex(t, "ff03030303787878787878"), LoginCommand("xxxxxx"))
 	// Passwords shorter than 6 bytes are zero-padded to 6.
-	if got := LoginCommand("12"); !bytes.Equal(got, mustHex(t, "ff03030303313200000000")) {
-		t.Fatalf("login(12) = %x", got)
-	}
+	require.Equal(t, mustHex(t, "ff03030303313200000000"), LoginCommand("12"))
 	// Passwords of 6+ bytes are sent verbatim (no truncation/padding).
-	if got := LoginCommand("longpass"); !bytes.Equal(got, mustHex(t, "ff030303036c6f6e6770617373")) {
-		t.Fatalf("login(longpass) = %x", got)
-	}
+	require.Equal(t, mustHex(t, "ff030303036c6f6e6770617373"), LoginCommand("longpass"))
 }
 
 func TestFixedCommands(t *testing.T) {
@@ -46,180 +39,131 @@ func TestFixedCommands(t *testing.T) {
 		{"heartbeat", HeartbeatCommand(), "ff010101010101"},
 	}
 	for _, c := range cases {
-		if !bytes.Equal(c.got, mustHex(t, c.want)) {
-			t.Errorf("%s = %x, want %s", c.name, c.got, c.want)
-		}
+		require.Equal(t, mustHex(t, c.want), c.got, c.name)
 	}
 }
 
 func TestGotoCommand(t *testing.T) {
 	// range 1000: 50% -> 500 = 0x01F4 -> LE "f4 01"
-	if got := GotoCommand(50, 1000); !bytes.Equal(got, mustHex(t, "ff58ea41bf03f401")) {
-		t.Errorf("goto(50,1000) = %x", got)
-	}
+	require.Equal(t, mustHex(t, "ff58ea41bf03f401"), GotoCommand(50, 1000))
 	// 100% -> 1000 = 0x03E8 -> LE "e8 03"
-	if got := GotoCommand(100, 1000); !bytes.Equal(got, mustHex(t, "ff58ea41bf03e803")) {
-		t.Errorf("goto(100,1000) = %x", got)
-	}
+	require.Equal(t, mustHex(t, "ff58ea41bf03e803"), GotoCommand(100, 1000))
 	// single-byte range: 50% of 100 -> 0x32
-	if got := GotoCommand(50, 100); !bytes.Equal(got, mustHex(t, "ff58ea41bf0332")) {
-		t.Errorf("goto(50,100) = %x", got)
-	}
+	require.Equal(t, mustHex(t, "ff58ea41bf0332"), GotoCommand(50, 100))
 	// clamp
-	if got := GotoCommand(200, 1000); !bytes.Equal(got, mustHex(t, "ff58ea41bf03e803")) {
-		t.Errorf("goto(200,1000) clamp = %x", got)
-	}
+	require.Equal(t, mustHex(t, "ff58ea41bf03e803"), GotoCommand(200, 1000))
 }
 
 func TestParseLoginResponse(t *testing.T) {
 	// Real captured frame: login succeeded.
 	ev, ok := ParseResponse(mustHex(t, "ff010203d40001"))
-	if !ok || ev.Type != EventLoginResult || !ev.Success {
-		t.Fatalf("login parse: ok=%v ev=%+v", ok, ev)
-	}
+	require.True(t, ok)
+	require.Equal(t, EventLoginResult, ev.Type)
+	require.True(t, ev.Success)
 }
 
 func TestParseStatusResponse(t *testing.T) {
 	// FF 01 02 03 D2 <flags=0x09> <pos=0x40>: reverse bit set, low battery (0x08).
 	ev, ok := ParseResponse(mustHex(t, "ff010203d20940"))
-	if !ok || ev.Type != EventStatus {
-		t.Fatalf("status parse: ok=%v ev=%+v", ok, ev)
-	}
-	if ev.Position != 0x40 {
-		t.Errorf("position = %d, want 64", ev.Position)
-	}
-	if ev.Battery != BatteryLow || !ev.HasBattery {
-		t.Errorf("battery = %v, want low", ev.Battery)
-	}
-	if !ev.Reversed {
-		t.Errorf("reverse bit should be set")
-	}
+	require.True(t, ok)
+	require.Equal(t, EventStatus, ev.Type)
+	require.EqualValues(t, 0x40, ev.Position)
+	require.True(t, ev.HasBattery)
+	require.Equal(t, BatteryLow, ev.Battery)
+	require.True(t, ev.Reversed, "reverse bit should be set")
 }
 
 func TestSpeedCommand(t *testing.T) {
 	cases := map[int]string{100: "ff58ea41f00301", 75: "ff58ea41f10301", 50: "ff58ea41f20301", 25: "ff58ea41f30301"}
 	for pct, want := range cases {
-		if got := SpeedCommand(pct); !bytes.Equal(got, mustHex(t, want)) {
-			t.Errorf("speed(%d) = %x, want %s", pct, got, want)
-		}
+		require.Equal(t, mustHex(t, want), SpeedCommand(pct), "speed(%d)", pct)
 	}
 	// snapping to nearest preset
-	if got := SpeedCommand(60); !bytes.Equal(got, mustHex(t, "ff58ea41f20301")) {
-		t.Errorf("speed(60) should snap to 50: %x", got)
-	}
+	require.Equal(t, mustHex(t, "ff58ea41f20301"), SpeedCommand(60), "speed(60) should snap to 50")
 }
 
 func TestFavoriteCommands(t *testing.T) {
-	if got := GoToFavoriteCommand(); !bytes.Equal(got, mustHex(t, "ff58ea4193")) {
-		t.Errorf("gotoFavorite = %x", got)
-	}
-	if got := SetFavoriteCommand(); !bytes.Equal(got, mustHex(t, "ff58ea4191")) {
-		t.Errorf("setFavorite = %x", got)
-	}
-	if got := DeleteFavoriteCommand(); !bytes.Equal(got, mustHex(t, "ff58ea4192")) {
-		t.Errorf("deleteFavorite = %x", got)
-	}
+	require.Equal(t, mustHex(t, "ff58ea4193"), GoToFavoriteCommand())
+	require.Equal(t, mustHex(t, "ff58ea4191"), SetFavoriteCommand())
+	require.Equal(t, mustHex(t, "ff58ea4192"), DeleteFavoriteCommand())
 }
 
 func TestSetClockCommand(t *testing.T) {
 	// 2026-07-04 22:15:30 -> 1a 07 04 16 0f 1e
 	tm := time.Date(2026, time.July, 4, 22, 15, 30, 0, time.UTC)
-	if got := SetClockCommand(tm); !bytes.Equal(got, mustHex(t, "ff58ea410200"+"1a0704160f1e")) {
-		t.Errorf("setClock = %x", got)
-	}
+	require.Equal(t, mustHex(t, "ff58ea410200"+"1a0704160f1e"), SetClockCommand(tm))
 }
 
 func TestAddDeleteTimerCommand(t *testing.T) {
 	// slot 1, weekdays (0x3E), 07:30:00, 100% (=1000=e803), not silent
-	got := AddTimerCommand(1, Weekdays, 7, 30, 0, 100, false, 1000)
-	if !bytes.Equal(got, mustHex(t, "ff58ea41030001b23f3e071e00e803")) {
-		t.Errorf("addTimer = %x", got)
-	}
-	if Weekdays != 0x3E {
-		t.Errorf("Weekdays mask = %#x, want 0x3e", byte(Weekdays))
-	}
-	if got := DeleteTimerCommand(5); !bytes.Equal(got, mustHex(t, "ff58ea41030105")) {
-		t.Errorf("deleteTimer = %x", got)
-	}
+	require.Equal(t, mustHex(t, "ff58ea41030001b23f3e071e00e803"), AddTimerCommand(1, Weekdays, 7, 30, 0, 100, false, 1000))
+	require.EqualValues(t, 0x3E, Weekdays, "Weekdays mask")
+	require.Equal(t, mustHex(t, "ff58ea41030105"), DeleteTimerCommand(5))
 }
 
 func TestParseTimerResponses(t *testing.T) {
-	if ev, ok := ParseResponse(mustHex(t, "ff010203d70001")); !ok || ev.Type != EventTimerSet || !ev.Success {
-		t.Errorf("D7: ok=%v ev=%+v", ok, ev)
-	}
-	if ev, ok := ParseResponse(mustHex(t, "ff010203d80001")); !ok || ev.Type != EventTimerDelete || !ev.Success {
-		t.Errorf("D8: ok=%v ev=%+v", ok, ev)
-	}
-	if ev, ok := ParseResponse(mustHex(t, "ff010203d6000a")); !ok || ev.Type != EventTimerIndex || ev.Index != 10 {
-		t.Errorf("D6: ok=%v ev=%+v", ok, ev)
-	}
+	ev, ok := ParseResponse(mustHex(t, "ff010203d70001"))
+	require.True(t, ok)
+	require.Equal(t, EventTimerSet, ev.Type)
+	require.True(t, ev.Success)
+
+	ev, ok = ParseResponse(mustHex(t, "ff010203d80001"))
+	require.True(t, ok)
+	require.Equal(t, EventTimerDelete, ev.Type)
+	require.True(t, ev.Success)
+
+	ev, ok = ParseResponse(mustHex(t, "ff010203d6000a"))
+	require.True(t, ok)
+	require.Equal(t, EventTimerIndex, ev.Type)
+	require.EqualValues(t, 10, ev.Index)
 }
 
 func TestParseD1StatusReply(t *testing.T) {
 	// Real captured readStatus reply at 75%: D1 02 4B EE02 CE1F 00.
 	ev, ok := ParseResponse(mustHex(t, "ff010203d1024bee02ce1f00"))
-	if !ok || ev.Type != EventStatus {
-		t.Fatalf("D1 parse: ok=%v ev=%+v", ok, ev)
-	}
-	if ev.Position != 75 {
-		t.Errorf("position = %d, want 75", ev.Position)
-	}
-	if ev.PositionRaw != 750 {
-		t.Errorf("positionRaw = %d, want 750", ev.PositionRaw)
-	}
+	require.True(t, ok)
+	require.Equal(t, EventStatus, ev.Type)
+	require.EqualValues(t, 75, ev.Position)
+	require.EqualValues(t, 750, ev.PositionRaw)
 	// D1 carries battery in the flags byte too (0x02 & 0x18 == 0 -> normal).
-	if !ev.HasBattery || ev.Battery != BatteryNormal {
-		t.Errorf("D1 battery = %v (hasBattery=%v), want normal", ev.Battery, ev.HasBattery)
-	}
+	require.True(t, ev.HasBattery)
+	require.Equal(t, BatteryNormal, ev.Battery)
 }
 
 func TestParseD2BatteryAndRaw(t *testing.T) {
 	// D2 flags 0x10 => battery none; position % at [2], raw 16-bit LE at [3..4].
 	ev, ok := ParseResponse(mustHex(t, "ff010203d21064e803"))
-	if !ok || ev.Type != EventStatus || !ev.HasBattery {
-		t.Fatalf("D2 parse: ok=%v ev=%+v", ok, ev)
-	}
-	if ev.Battery != BatteryNone {
-		t.Errorf("battery = %v, want none", ev.Battery)
-	}
-	if ev.Position != 100 {
-		t.Errorf("position = %d, want 100", ev.Position)
-	}
-	if ev.PositionRaw != 1000 {
-		t.Errorf("positionRaw = %d, want 1000", ev.PositionRaw)
-	}
+	require.True(t, ok)
+	require.Equal(t, EventStatus, ev.Type)
+	require.True(t, ev.HasBattery)
+	require.Equal(t, BatteryNone, ev.Battery)
+	require.EqualValues(t, 100, ev.Position)
+	require.EqualValues(t, 1000, ev.PositionRaw)
 }
 
 func TestParseCapturedD1(t *testing.T) {
 	// Real readStatus reply captured from an HD1300: position 99% (raw 999),
 	// flags 0x02 => reverse off, battery normal.
 	ev, ok := ParseResponse(mustHex(t, "ff010203d10263e703ce1fb3"))
-	if !ok || ev.Type != EventStatus {
-		t.Fatalf("parse: ok=%v ev=%+v", ok, ev)
-	}
-	if ev.Position != 99 || ev.PositionRaw != 999 {
-		t.Errorf("position=%d raw=%d, want 99/999", ev.Position, ev.PositionRaw)
-	}
-	if !ev.HasBattery || ev.Battery != BatteryNormal {
-		t.Errorf("battery=%v hasBattery=%v, want normal", ev.Battery, ev.HasBattery)
-	}
-	if ev.Reversed {
-		t.Errorf("reversed should be false")
-	}
+	require.True(t, ok)
+	require.Equal(t, EventStatus, ev.Type)
+	require.EqualValues(t, 99, ev.Position)
+	require.EqualValues(t, 999, ev.PositionRaw)
+	require.True(t, ev.HasBattery)
+	require.Equal(t, BatteryNormal, ev.Battery)
+	require.False(t, ev.Reversed)
 }
 
 func TestParseUnknownOpcode(t *testing.T) {
 	ev, ok := ParseResponse(mustHex(t, "ff010203ab0102"))
-	if !ok || ev.Type != EventUnknown || ev.Opcode != 0xAB {
-		t.Fatalf("unknown opcode: ok=%v ev=%+v", ok, ev)
-	}
+	require.True(t, ok)
+	require.Equal(t, EventUnknown, ev.Type)
+	require.EqualValues(t, 0xAB, ev.Opcode)
 }
 
 func TestParseRejectsGarbage(t *testing.T) {
-	if _, ok := ParseResponse([]byte{0x01, 0x02}); ok {
-		t.Error("short frame should not parse")
-	}
-	if _, ok := ParseResponse([]byte{0xAA, 0xBB, 0xCC, 0xDD, 0xEE}); ok {
-		t.Error("wrong header should not parse")
-	}
+	_, ok := ParseResponse([]byte{0x01, 0x02})
+	require.False(t, ok, "short frame should not parse")
+	_, ok = ParseResponse([]byte{0xAA, 0xBB, 0xCC, 0xDD, 0xEE})
+	require.False(t, ok, "wrong header should not parse")
 }

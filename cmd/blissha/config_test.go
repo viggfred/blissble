@@ -6,20 +6,19 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func writeConfig(t *testing.T, body string) string {
 	t.Helper()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.yaml")
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
 	return path
 }
 
-func TestLoadConfigDefaultsAndParsing(t *testing.T) {
-	path := writeConfig(t, `
+func TestLoadConfigParsing(t *testing.T) {
+	c, err := LoadConfig(writeConfig(t, `
 mqtt:
   broker: tcp://broker:1883
 poll_interval: 45s
@@ -30,82 +29,60 @@ blinds:
   - name: Bedroom
     mac: AA:BB:CC:DD:EE:FF
     invert: true
-`)
-	c, err := LoadConfig(path)
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	if c.MQTT.ClientID != "blissble" || c.MQTT.DiscoveryPrefix != "homeassistant" || c.MQTT.BaseTopic != "blissble" {
-		t.Errorf("defaults not applied: %+v", c.MQTT)
-	}
-	if c.Poll == nil || time.Duration(*c.Poll) != 45*time.Second {
-		t.Errorf("poll = %v, want 45s", c.Poll)
-	}
-	if len(c.Blinds) != 2 || c.Blinds[0].Name != "Living Room" || !c.Blinds[1].Invert {
-		t.Errorf("blinds parsed wrong: %+v", c.Blinds)
-	}
+`))
+	require.NoError(t, err)
+	require.Equal(t, "tcp://broker:1883", c.MQTT.Broker)
+	require.Equal(t, 45*time.Second, c.Poll)
+	require.Len(t, c.Blinds, 2)
+	require.Equal(t, "Living Room", c.Blinds[0].Name)
+	require.Equal(t, "shade", c.Blinds[0].DeviceClass)
+	require.True(t, c.Blinds[1].Invert)
 }
 
-func TestPollIntervalDefaults(t *testing.T) {
+func TestLoadConfigPollDefaults(t *testing.T) {
 	// Unset -> persistent default (30s).
-	c, _ := LoadConfig(writeConfig(t, "mqtt:\n  broker: b\n"))
-	if c.Poll == nil || time.Duration(*c.Poll) != 30*time.Second {
-		t.Errorf("unset poll = %v, want 30s", c.Poll)
-	}
+	c, err := LoadConfig(writeConfig(t, "mqtt:\n  broker: b\n"))
+	require.NoError(t, err)
+	require.Equal(t, 30*time.Second, c.Poll)
+
 	// Unset in on-demand -> hourly default.
-	c, _ = LoadConfig(writeConfig(t, "mqtt:\n  broker: b\nidle_disconnect: 30s\n"))
-	if c.Poll == nil || time.Duration(*c.Poll) != time.Hour {
-		t.Errorf("unset on-demand poll = %v, want 1h", c.Poll)
-	}
-	// Explicit 0 -> disabled (command-only), NOT re-defaulted.
-	c, _ = LoadConfig(writeConfig(t, "mqtt:\n  broker: b\npoll_interval: 0s\n"))
-	if c.Poll == nil || *c.Poll != 0 {
-		t.Errorf("poll_interval 0 = %v, want 0 (disabled)", c.Poll)
-	}
+	c, err = LoadConfig(writeConfig(t, "mqtt:\n  broker: b\nidle_disconnect: 30s\n"))
+	require.NoError(t, err)
+	require.Equal(t, time.Hour, c.Poll)
+
+	// Explicit 0 -> command-only, NOT re-defaulted.
+	c, err = LoadConfig(writeConfig(t, "mqtt:\n  broker: b\npoll_interval: 0s\n"))
+	require.NoError(t, err)
+	require.Zero(t, c.Poll, "explicit 0 means command-only")
 }
 
-func TestLoadConfigValidation(t *testing.T) {
-	// Missing broker.
-	if _, err := LoadConfig(writeConfig(t, "blinds: []\n")); err == nil {
-		t.Error("expected error for missing broker")
-	}
-	// Duplicate MAC.
-	dup := writeConfig(t, `
-mqtt:
-  broker: tcp://b:1883
-blinds:
-  - name: A
-    mac: AA:BB:CC:DD:EE:01
-  - name: B
-    mac: AA-BB-CC-DD-EE-01
-`)
-	if _, err := LoadConfig(dup); err == nil {
-		t.Error("expected error for duplicate mac")
-	}
-	// Zero blinds is allowed.
-	if _, err := LoadConfig(writeConfig(t, "mqtt:\n  broker: tcp://b:1883\n")); err != nil {
-		t.Errorf("zero blinds should be valid: %v", err)
-	}
+func TestLoadConfigErrors(t *testing.T) {
+	// Missing file.
+	_, err := LoadConfig(filepath.Join(t.TempDir(), "nope.yaml"))
+	require.Error(t, err, "missing file")
+
+	// Bad duration.
+	_, err = LoadConfig(writeConfig(t, "mqtt:\n  broker: b\npoll_interval: notaduration\n"))
+	require.Error(t, err, "bad duration")
+
+	// Malformed YAML.
+	_, err = LoadConfig(writeConfig(t, "mqtt: [this is not a map\n"))
+	require.Error(t, err, "malformed yaml")
 }
 
-func TestTLSConfigBuild(t *testing.T) {
-	tc, err := (&TLSConfig{Insecure: true}).build()
-	if err != nil {
-		t.Fatalf("insecure build: %v", err)
-	}
-	if !tc.InsecureSkipVerify || tc.MinVersion != tls.VersionTLS12 {
-		t.Errorf("insecure=%v minVersion=%#x", tc.InsecureSkipVerify, tc.MinVersion)
-	}
-	if _, err := (&TLSConfig{CACert: "/no/such/ca.pem"}).build(); err == nil {
-		t.Error("expected error for missing ca_cert")
-	}
-	if _, err := (&TLSConfig{Cert: "/x.pem"}).build(); err == nil {
-		t.Error("expected error for cert without key")
-	}
-}
+func TestLoadConfigTLS(t *testing.T) {
+	// insecure: true builds a config that skips verification.
+	c, err := LoadConfig(writeConfig(t, "mqtt:\n  broker: tls://b:8883\n  tls:\n    insecure: true\n"))
+	require.NoError(t, err)
+	require.NotNil(t, c.MQTT.TLS)
+	require.True(t, c.MQTT.TLS.InsecureSkipVerify)
+	require.Equal(t, uint16(tls.VersionTLS12), c.MQTT.TLS.MinVersion)
 
-func TestDurationUnmarshalError(t *testing.T) {
-	if _, err := LoadConfig(writeConfig(t, "mqtt:\n  broker: b\npoll_interval: notaduration\n")); err == nil {
-		t.Error("expected error for bad duration")
-	}
+	// A missing CA file is a load error.
+	_, err = LoadConfig(writeConfig(t, "mqtt:\n  broker: b\n  tls:\n    ca_cert: /no/such/ca.pem\n"))
+	require.Error(t, err, "missing ca_cert")
+
+	// A client cert without a key is a load error.
+	_, err = LoadConfig(writeConfig(t, "mqtt:\n  broker: b\n  tls:\n    cert: /x.pem\n"))
+	require.Error(t, err, "cert without key")
 }

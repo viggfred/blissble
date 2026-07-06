@@ -1,4 +1,4 @@
-package main
+package blissha
 
 import (
 	"fmt"

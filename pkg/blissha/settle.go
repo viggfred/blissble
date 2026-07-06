@@ -1,4 +1,4 @@
-package main
+package blissha
 
 // settleStableReads is how many consecutive unchanged position samples mark a
 // moving blind as stopped.

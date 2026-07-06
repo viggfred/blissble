@@ -3,6 +3,8 @@ package main
 import (
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/viggfred/blissble/pkg/bliss"
 )
 
@@ -23,8 +25,9 @@ func TestParseDays(t *testing.T) {
 	}
 	for _, c := range cases {
 		got, ok := parseDays(c.in)
-		if ok != c.ok || (ok && got != c.want) {
-			t.Errorf("parseDays(%q) = %#x,%v; want %#x,%v", c.in, byte(got), ok, byte(c.want), c.ok)
+		require.Equal(t, c.ok, ok, "parseDays(%q) ok", c.in)
+		if c.ok {
+			require.Equal(t, c.want, got, "parseDays(%q)", c.in)
 		}
 	}
 }
@@ -45,17 +48,19 @@ func TestParseHHMM(t *testing.T) {
 	}
 	for _, c := range cases {
 		h, m, ok := parseHHMM(c.in)
-		if ok != c.ok || (ok && (h != c.h || m != c.m)) {
-			t.Errorf("parseHHMM(%q) = %d,%d,%v; want %d,%d,%v", c.in, h, m, ok, c.h, c.m, c.ok)
+		require.Equal(t, c.ok, ok, "parseHHMM(%q) ok", c.in)
+		if c.ok {
+			require.Equal(t, c.h, h, "parseHHMM(%q) hour", c.in)
+			require.Equal(t, c.m, m, "parseHHMM(%q) min", c.in)
 		}
 	}
 }
 
 func TestAtoiOK(t *testing.T) {
-	if n, ok := atoiOK("42"); !ok || n != 42 {
-		t.Errorf("atoiOK(42) = %d,%v", n, ok)
-	}
-	if _, ok := atoiOK("x"); ok {
-		t.Errorf("atoiOK(x) should fail")
-	}
+	n, ok := atoiOK("42")
+	require.True(t, ok)
+	require.Equal(t, 42, n)
+
+	_, ok = atoiOK("x")
+	require.False(t, ok)
 }
