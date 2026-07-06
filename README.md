@@ -123,10 +123,12 @@ blinds:
 
 **Multiple adapters (multi-room).** BLE range is short, so for blinds in
 different rooms you can use one USB Bluetooth dongle per room (e.g. on a USB
-extension). Set each blind's `adapter:` to that dongle's own Bluetooth MAC —
-stable across reboots, unlike `hciN` numbering. Blinds on the same adapter
-serialize their scans; different adapters scan in parallel. Omit `adapter:` to
-use the default (`hci0`). BlueZ handles the multiple adapters automatically.
+extension). Set each blind's `adapter:` to that dongle's own Bluetooth MAC (the
+adapter is resolved via BlueZ over D-Bus, so the MAC is stable across reboots,
+unlike `hciN` numbering — or give `hci0`/`hci1` directly). Omit `adapter:` to
+use the default (`hci0`). BlueZ drives the dongles in parallel, but scans are
+serialized across all of them (one at a time) to avoid a cross-adapter
+discovery conflict in the BLE stack.
 
 ### Power saving
 
