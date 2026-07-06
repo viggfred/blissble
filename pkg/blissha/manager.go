@@ -97,6 +97,12 @@ type manager struct {
 	actions        chan blindOp
 	log            *slog.Logger
 
+	// availMu guards availState (published from both the manager goroutine and the
+	// bridge's shutdown path). availState is the last availability we published, so
+	// we only publish on a change.
+	availMu    sync.Mutex
+	availState string
+
 	// Automation (zero value ModeOff = disabled). All of these fields are owned
 	// exclusively by the manager goroutine; external signals arrive via control.
 	auto     Automation
@@ -362,9 +368,14 @@ func (m *manager) runOnDemand(ctx context.Context) {
 	}
 }
 
-// ensureConnected connects if the link is down, updating availability.
+// ensureConnected connects if the link is down, and reconciles availability with
+// the actual connection state. The reconcile matters because the BLE client can
+// reconnect on its own inside Send (retry-after-drop); without it, an "offline"
+// published on an earlier failed connect would never be corrected back to
+// "online" once the link recovered through that path.
 func (m *manager) ensureConnected(ctx context.Context) {
 	if m.blind.State().Connected {
+		m.publishAvailability("online")
 		return
 	}
 	if err := m.blind.Connect(ctx); err != nil {
@@ -417,6 +428,10 @@ func (m *manager) runOp(ctx context.Context, op blindOp) {
 	m.publishState(op.state)
 	if err := op.fn(); err != nil {
 		m.log.Warn("command failed", "action", op.desc, "error", err)
+	} else {
+		// The command reached the motor, so the link is up — even if it was
+		// restored by an internal reconnect inside Send after an earlier failure.
+		m.publishAvailability("online")
 	}
 	if op.track {
 		m.trackUntilSettled(ctx)
@@ -636,5 +651,11 @@ func (m *manager) handleSetPosition(_ mqtt.Client, msg mqtt.Message) {
 }
 
 func (m *manager) publishAvailability(state string) {
-	m.client.Publish(m.t.availability, 1, true, state)
+	m.availMu.Lock()
+	changed := state != m.availState
+	m.availState = state
+	m.availMu.Unlock()
+	if changed {
+		m.client.Publish(m.t.availability, 1, true, state)
+	}
 }
