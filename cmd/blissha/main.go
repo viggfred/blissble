@@ -254,25 +254,43 @@ func (m *manager) pollLoop(ctx context.Context) {
 	}
 }
 
+// onDemandRetryStart/Cap bound the reconnect backoff used while a blind is
+// unreachable in on-demand mode (so it recovers in seconds-to-minutes rather
+// than waiting for the — possibly hourly — poll interval).
+const (
+	onDemandRetryStart = 5 * time.Second
+	onDemandRetryCap   = 2 * time.Minute
+)
+
 // runOnDemand keeps the BLE link disconnected while idle. It connects to run a
 // queued command or a periodic refresh, then drops the link after idleDisconnect
 // of inactivity — trading a few seconds of latency for much less battery use.
+// While the blind is unreachable it retries on a bounded backoff.
 func (m *manager) runOnDemand(ctx context.Context) {
 	m.publishAvailability("online") // optimistic; refined on each connect attempt
-	var refresh <-chan time.Time
-	if m.poll > 0 {
-		t := time.NewTicker(m.poll)
-		defer t.Stop()
-		refresh = t.C
-	}
+
 	idle := time.NewTimer(m.idleDisconnect)
 	idle.Stop()
+	refresh := time.NewTimer(0) // fires ~immediately for the startup refresh
+	defer refresh.Stop()
 	defer m.blind.Disconnect()
 
-	// Connect once at startup so Home Assistant gets current position/battery
-	// immediately, rather than waiting for the first refresh tick.
-	_ = m.refreshState(ctx)
-	idle.Reset(m.idleDisconnect)
+	backoff := onDemandRetryStart
+	// scheduleRefresh arms the refresh timer: soon (bounded backoff) while the
+	// blind is unreachable, otherwise at the normal poll cadence, and re-arms the
+	// idle-disconnect timer whenever the link is up.
+	scheduleRefresh := func() {
+		if !m.blind.State().Connected {
+			refresh.Reset(backoff)
+			backoff = min(backoff*2, onDemandRetryCap)
+			return
+		}
+		backoff = onDemandRetryStart
+		idle.Reset(m.idleDisconnect)
+		if m.poll > 0 {
+			refresh.Reset(m.poll)
+		}
+	}
 
 	for {
 		select {
@@ -280,10 +298,10 @@ func (m *manager) runOnDemand(ctx context.Context) {
 			return
 		case op := <-m.actions:
 			m.runOp(ctx, op)
-			idle.Reset(m.idleDisconnect)
-		case <-refresh:
+			scheduleRefresh()
+		case <-refresh.C:
 			_ = m.refreshState(ctx)
-			idle.Reset(m.idleDisconnect)
+			scheduleRefresh()
 		case <-idle.C:
 			m.log.Debug("idle; disconnecting to save battery")
 			m.blind.Disconnect()
