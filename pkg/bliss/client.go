@@ -54,6 +54,7 @@ type Blind struct {
 	mu        sync.RWMutex
 	device    bluetooth.Device
 	cmdChar   bluetooth.DeviceCharacteristic
+	respChar  bluetooth.DeviceCharacteristic // kept so notifications can be stopped on Disconnect
 	connected bool
 	state     State
 	onEvent   func(Event)
@@ -134,6 +135,9 @@ func (b *Blind) connectOnce(ctx context.Context) error {
 	}
 
 	if err := respChar.EnableNotifications(b.onNotify); err != nil {
+		// StartNotify can fail after the library has already registered its D-Bus
+		// signal watcher; unsubscribe to tear that down before bailing.
+		_ = respChar.EnableNotifications(nil)
 		device.Disconnect()
 		return fmt.Errorf("subscribe to responses: %w", err)
 	}
@@ -141,6 +145,7 @@ func (b *Blind) connectOnce(ctx context.Context) error {
 	b.mu.Lock()
 	b.device = device
 	b.cmdChar = cmdChar
+	b.respChar = respChar
 	b.connected = true
 	b.state.Connected = true
 	b.mu.Unlock()
@@ -434,16 +439,23 @@ func (b *Blind) State() State {
 	return b.state
 }
 
-// Disconnect tears down the BLE connection.
+// Disconnect tears down the BLE connection. It stops notifications first so the
+// underlying library removes its per-characteristic D-Bus signal watcher and
+// goroutine; otherwise every reconnect leaks one and, because BlueZ reuses the
+// characteristic's object path, a single notification is then delivered once per
+// leaked subscription.
 func (b *Blind) Disconnect() error {
 	b.mu.Lock()
 	device := b.device
+	respChar := b.respChar
 	wasConnected := b.connected
 	b.connected = false
+	b.respChar = bluetooth.DeviceCharacteristic{}
 	b.state = State{}
 	b.mu.Unlock()
 	if !wasConnected {
 		return nil
 	}
+	_ = respChar.EnableNotifications(nil) // best effort; also cleans up if the link already dropped
 	return device.Disconnect()
 }
