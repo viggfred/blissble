@@ -158,3 +158,21 @@ func TestPublishAvailabilityDedupsAndRecovers(t *testing.T) {
 
 	require.Equal(t, []string{"online", "offline", "online"}, rc.published)
 }
+
+func TestOnBLEEventMarksAvailable(t *testing.T) {
+	m := testManager(Automation{Mode: ModeOff}, Location{})
+	rc := &recordingClient{}
+	m.client = rc
+
+	// A received frame (even one that reconnected inside Send) must reconcile
+	// availability to "online".
+	m.onBLEEvent(bliss.Event{Type: bliss.EventStatus, Position: 50})
+	require.Contains(t, rc.published, "online", "a received frame should mark the blind available")
+
+	// Change-tracked: a second frame does not republish availability.
+	before := len(rc.published)
+	m.onBLEEvent(bliss.Event{Type: bliss.EventStatus, Position: 60})
+	for _, p := range rc.published[before:] {
+		require.NotEqual(t, "online", p, "availability should not be republished when unchanged")
+	}
+}

@@ -594,6 +594,13 @@ func (m *manager) publishState(s string) {
 }
 
 func (m *manager) onBLEEvent(ev bliss.Event) {
+	// Receiving any frame proves the link is up, so reconcile availability to
+	// "online". This is the catch-all that also covers the refresh path, where a
+	// status read may reconnect inside Send after ensureConnected published
+	// "offline" — nothing else on that path would correct it. publishAvailability
+	// is change-tracked and mutex-guarded, so calling it from this BLE-callback
+	// goroutine is cheap and safe.
+	m.publishAvailability("online")
 	if ev.Type != bliss.EventStatus {
 		return
 	}
