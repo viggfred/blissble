@@ -7,7 +7,7 @@
 // It manages 0..many blinds across one or more Bluetooth adapters over a single
 // MQTT connection, and is designed to run as a container (see the Containerfile).
 // The reusable bridge lives in github.com/viggfred/blissble/pkg/blissha; this
-// command just wraps it with YAML/CLI configuration.
+// command just wraps it with the YAML schema from pkg/blissha/yamlcfg.
 package main
 
 import (
@@ -23,6 +23,7 @@ import (
 	_ "time/tzdata" // embed the IANA tz database so location.timezone resolves anywhere
 
 	"github.com/viggfred/blissble/pkg/blissha"
+	"github.com/viggfred/blissble/pkg/blissha/yamlcfg"
 )
 
 func main() {
@@ -38,7 +39,7 @@ func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 	slog.SetDefault(logger)
 
-	cfg, err := LoadConfig(*configPath)
+	cfg, err := yamlcfg.Load(*configPath)
 	if err != nil {
 		logger.Error("failed to load config", "error", err)
 		os.Exit(1)
